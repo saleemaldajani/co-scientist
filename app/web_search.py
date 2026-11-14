@@ -19,7 +19,8 @@ import json
 import os
 import re
 import threading
-from typing import Any, Callable, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 PREAMBLE = (
     "WEB SEARCH RESULTS - the results of the web searches you asked for: search-engine snippets and short page "
@@ -54,14 +55,11 @@ def _excerpt(text: str, query: str, n: int) -> str:
     return "\n".join(paras[i] for i in sorted(keep))
 
 
-def default_searcher(backend: str) -> Callable[[str, int], List[Dict[str, str]]]:
-    def search(query: str, k: int) -> List[Dict[str, str]]:
-        from ddgs import DDGS  # optional dependency; imported only when web search is used
+def default_searcher(query: str, k: int, backend: str) -> List[Dict[str, str]]:
+    from ddgs import DDGS  # optional dependency; imported only when web search is used
 
-        hits = DDGS().text(query, max_results=k, backend=backend) or []
-        return [dict(title=h.get("title", ""), url=h.get("href", ""), snippet=h.get("body", "")) for h in hits]
-
-    return search
+    hits = DDGS().text(query, max_results=k, backend=backend) or []
+    return [dict(title=h.get("title", ""), url=h.get("href", ""), snippet=h.get("body", "")) for h in hits]
 
 
 def default_fetcher(url: str) -> str:
@@ -100,9 +98,10 @@ class WebSearch:
         k: int = 5,
         fetch_pages: int = 2,
         budget: int = 6000,
-        backend: str = "bing",
-        searcher: Optional[Callable[[str, int], List[Dict[str, str]]]] = None,
+        backends: Sequence[str] = ("bing", "bing", "auto", "auto"),
+        searcher: Optional[Callable[[str, int, str], List[Dict[str, str]]]] = None,
         fetcher: Optional[Callable[[str], str]] = None,
+        wait: float = 2.0,
     ):
         self.cache_path, self.n_queries, self.k, self.fetch_pages, self.budget = (
             cache_path,
@@ -111,11 +110,12 @@ class WebSearch:
             fetch_pages,
             budget,
         )
-        self.backend = backend
-        self.searcher = searcher or default_searcher(backend)
+        self.backends, self.wait = list(backends), wait
+        self.searcher = searcher or default_searcher
         self.fetcher = fetcher or default_fetcher
         self.log: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
+        self._search_lock = threading.Lock()  # one search at a time: engines refuse bursts
         self._cache: Dict[str, Any] = {"queries": {}, "pages": {}}
         if cache_path and os.path.exists(cache_path):
             with open(cache_path) as f:
@@ -124,7 +124,7 @@ class WebSearch:
     def describe(self) -> str:
         return (
             f"web search before each generation step: up to {self.n_queries} model-written queries, top {self.k} hits "
-            f"each ({self.backend}), excerpts of the first {self.fetch_pages} pages, about {self.budget:,} characters"
+            f"each (engine: {self.backends[0]}, then the others in {self.backends} on failure), excerpts of the first {self.fetch_pages} pages, about {self.budget:,} characters"
         )
 
     def _save(self) -> None:
@@ -135,15 +135,23 @@ class WebSearch:
             os.replace(tmp, self.cache_path)
 
     def search(self, query: str) -> Dict[str, Any]:
-        key = f"{self.backend}|{self.k}|{query.strip().lower()}"
+        key = f"{self.k}|{query.strip().lower()}"
         with self._lock:
             hit = self._cache["queries"].get(key)
         if hit is not None:
             return dict(hit, cached=True)
-        try:
-            hits, err = self.searcher(query, self.k), None
-        except Exception as e:  # no results, network or engine error: the step goes on without them
-            hits, err = [], f"{type(e).__name__}: {str(e)[:200]}"
+        hits, err, used = [], None, None
+        with self._search_lock:
+            for i, b in enumerate(self.backends):  # an engine that refuses or finds nothing is retried, then the next
+                try:
+                    hits, err, used = self.searcher(query, self.k, b), None, b
+                    if hits:
+                        break
+                    err = "no results"
+                except Exception as e:  # network or engine error: the step goes on without these results
+                    err = f"{type(e).__name__}: {str(e)[:200]}"
+                if i + 1 < len(self.backends):
+                    time.sleep(self.wait)
         for h in hits[: self.fetch_pages]:
             url = h.get("url", "")
             with self._lock:
@@ -156,7 +164,7 @@ class WebSearch:
                 with self._lock:
                     self._cache["pages"][url] = page
             h["excerpt"] = _excerpt(page, query, 900)
-        rec = dict(query=query, hits=hits, error=err, retrieved=datetime.date.today().isoformat())
+        rec = dict(query=query, hits=hits, error=err, engine=used, retrieved=datetime.date.today().isoformat())
         with self._lock:
             if err is None:  # failures are not cached, so a later run can try again
                 self._cache["queries"][key] = rec

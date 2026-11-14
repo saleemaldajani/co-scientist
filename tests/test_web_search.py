@@ -9,7 +9,7 @@ from app.web_search import WebSearch, _excerpt, _page_text, parse_queries
 
 
 def fake_search(calls):
-    def search(q, k):
+    def search(q, k, backend):
         calls.append(q)
         return [
             dict(title=f"Hit {i} for {q}", url=f"https://example.org/{len(calls)}/{i}", snippet="snippet")
@@ -48,10 +48,10 @@ def test_cache_shares_results_between_runs(tmp_path):
 
 
 def test_failed_search_is_not_cached_and_step_continues(tmp_path):
-    def broken(q, k):
+    def broken(q, k, backend):
         raise RuntimeError("no results")
 
-    w = WebSearch(str(tmp_path / "c.json"), searcher=broken, fetcher=lambda u: "")
+    w = WebSearch(str(tmp_path / "c.json"), searcher=broken, fetcher=lambda u: "", wait=0)
     block = w.step(lambda p: '["x"]', "goal")
     assert "(no results)" in block and w.log[0]["results"][0]["error"].startswith("RuntimeError")
     assert not (tmp_path / "c.json").exists()  # nothing cached after a failure
@@ -116,3 +116,16 @@ def test_swarm_each_worker_searches(monkeypatch):
 def test_swarm_unchanged_without_search():
     s = swarm.SwarmCoScientist("goal")
     assert s.web is None and s.web_block(0, {"name": "x"}) == ""
+
+
+def test_engine_fallback_records_which_engine_answered():
+    tried = []
+
+    def flaky(q, k, backend):
+        tried.append(backend)
+        if len(tried) < 3:
+            raise RuntimeError("No results found.")
+        return [dict(title="t", url="", snippet="s")]
+
+    r = WebSearch(None, searcher=flaky, fetcher=lambda u: "", wait=0, backends=("a", "a", "b", "b")).search("q")
+    assert tried == ["a", "a", "b"] and r["engine"] == "b" and r["error"] is None and len(r["hits"]) == 1
