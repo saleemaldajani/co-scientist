@@ -127,17 +127,63 @@ class WebSearch:
             f"each (engine: {self.backends[0]}, then the others in {self.backends} on failure), excerpts of the first {self.fetch_pages} pages, about {self.budget:,} characters"
         )
 
+    def _locked(self):
+        """An exclusive lock on the cache file, so runs in parallel processes do not drop each other's entries."""
+        import contextlib
+
+        try:
+            import fcntl
+        except ImportError:  # no fcntl (Windows): no cross-process lock
+            return contextlib.nullcontext()
+
+        @contextlib.contextmanager
+        def lock():
+            with open(self.cache_path + ".lock", "w") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+
+        return lock()
+
+    def _disk(self) -> Dict[str, Any]:
+        if self.cache_path and os.path.exists(self.cache_path):
+            with open(self.cache_path) as f:
+                return json.load(f)
+        return {"queries": {}, "pages": {}}
+
+    def _lookup(self, key: str):
+        """The cached result for key, re-reading the file in case another run has searched it since."""
+        with self._lock:
+            hit = self._cache["queries"].get(key)
+        if hit is None and self.cache_path:
+            with self._locked():
+                disk = self._disk()
+            with self._lock:
+                for part in ("queries", "pages"):
+                    self._cache[part].update(disk.get(part, {}))
+                hit = self._cache["queries"].get(key)
+        return hit
+
     def _save(self) -> None:
-        if self.cache_path:
-            tmp = self.cache_path + ".tmp"
+        """Merge with what is on disk (first result for a query wins) and write atomically."""
+        if not self.cache_path:
+            return
+        with self._locked():
+            disk = self._disk()
+            for part in ("queries", "pages"):
+                for k, v in self._cache[part].items():
+                    disk[part].setdefault(k, v)
+                self._cache[part].update(disk[part])
+            tmp = self.cache_path + f".{os.getpid()}.tmp"
             with open(tmp, "w") as f:
-                json.dump(self._cache, f, indent=1)
+                json.dump(disk, f, indent=1)
             os.replace(tmp, self.cache_path)
 
     def search(self, query: str) -> Dict[str, Any]:
         key = f"{self.k}|{query.strip().lower()}"
-        with self._lock:
-            hit = self._cache["queries"].get(key)
+        hit = self._lookup(key)
         if hit is not None:
             return dict(hit, cached=True)
         hits, err, used = [], None, None
@@ -168,7 +214,9 @@ class WebSearch:
         with self._lock:
             if err is None:  # failures are not cached, so a later run can try again
                 self._cache["queries"][key] = rec
-                self._save()
+        if err is None:
+            self._save()
+            rec = self._cache["queries"][key]  # another run may have stored this query first: use its result
         return dict(rec, cached=False)
 
     def queries_prompt(self, goal: str, direction: str = "") -> str:

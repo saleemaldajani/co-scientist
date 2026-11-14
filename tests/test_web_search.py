@@ -129,3 +129,18 @@ def test_engine_fallback_records_which_engine_answered():
 
     r = WebSearch(None, searcher=flaky, fetcher=lambda u: "", wait=0, backends=("a", "a", "b", "b")).search("q")
     assert tried == ["a", "a", "b"] and r["engine"] == "b" and r["error"] is None and len(r["hits"]) == 1
+
+
+def test_two_runs_sharing_a_cache_keep_both_entries(tmp_path):
+    path = str(tmp_path / "cache.json")
+    a = WebSearch(path, k=1, searcher=fake_search([]), fetcher=lambda u: "")
+    b = WebSearch(path, k=1, searcher=fake_search([]), fetcher=lambda u: "")  # opened before a wrote anything
+    a.search("first")
+    b.search("second")
+    disk = json.load(open(path))["queries"]
+    assert {k.split("|", 1)[1] for k in disk} == {"first", "second"}
+    calls = []
+    c = WebSearch(path, k=1, searcher=fake_search(calls), fetcher=lambda u: "")
+    assert c.search("first")["cached"] and c.search("second")["cached"] and calls == []
+    # b had not seen a's entry in memory, but finds it on disk instead of searching again
+    assert b.search("first")["cached"]
