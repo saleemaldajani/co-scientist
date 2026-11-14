@@ -57,11 +57,14 @@ class ResearchGoal:
         top_k_hypotheses: Optional[int] = None,
         data=None,
         data_budget: int = 20000,
+        web=None,
     ):
         self.description = description
         # Optional uploaded data (app.data_context.DataBundle): an extract goes into every generation prompt
         self.data = data if data else None
         self.data_budget = data_budget
+        # Optional web search (app.web_search.WebSearch) before each generation call
+        self.web = web
         self.constraints = constraints if constraints else {}
         # Store runtime settings, falling back to config defaults if not provided
         self.llm_model = (
