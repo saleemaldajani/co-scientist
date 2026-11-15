@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .agents import call_llm_for_reflection
 from .data_context import DataBundle
-from .utils import call_llm, last_model_used, logger, similarity_score
+from .utils import call_llm, last_model_used, last_usage, logger, similarity_score
 from .web_search import WebSearch
 
 DEFAULT_LENSES = [
@@ -192,6 +192,7 @@ class SwarmCoScientist:
                 error=(out or "").startswith("Error:"),
                 prompt=prompt,
                 response=out,
+                **last_usage(),
             )
         )
         if (out or "").startswith("Error:"):
