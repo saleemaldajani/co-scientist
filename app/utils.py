@@ -309,6 +309,8 @@ def _attempt_model(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
+                    # optional output cap: stops a reply that repeats itself until the context is full
+                    **({"max_tokens": int(config["max_output_tokens"])} if config.get("max_output_tokens") else {}),
                 ),
                 max(LLM_CALL_MAX_SECONDS, float(config.get("llm_request_timeout_seconds", 30))),
             )
