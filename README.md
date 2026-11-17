@@ -48,6 +48,28 @@ the goal itself from a file:
 
 Attached data is sent to the model provider you select; with a local model it stays on your machine.
 
+### Science tools
+Under **🧪 Science tools**, choose **No tools** (the default: prompts are exactly as before), **All tools**, or
+**Choose tools** and tick the ones you want. Before each step that writes hypotheses (a single-mode generation; each
+swarm worker), the model can then query 32 scientific databases and literature services, and the web:
+
+- **Genes, variants and regulation:** Ensembl, ClinVar, dbSNP, gnomAD, GTEx, ENCODE cCREs, JASPAR, UniBind, UCSC
+  conservation and binding sites, NCBI sequences.
+- **Proteins and structures:** UniProt, InterPro, PDB, AlphaFold DB, Foldseek, STRING, Human Protein Atlas, QuickGO,
+  Reactome, sequence alignment and similarity search.
+- **Drugs, trials and targets:** ChEMBL, PubChem, openFDA, ClinicalTrials.gov, Open Targets, EMBL-EBI ontologies.
+- **Literature:** PubMed, Europe PMC, OpenAlex, arXiv, bioRxiv; and **web search**.
+
+With many tools on, the model first picks up to two that fit the goal (or the worker's direction), then reads their
+command-line help and writes up to three calls. Each call runs one script from `app/science_skills/` with a 60-second
+limit, in a scratch folder, without a shell, and without the model provider's key. Its output (and any file it writes)
+goes into that step's prompt as a TOOL RESULTS block of about 8,000 characters. A step with tools makes one or two
+extra model calls. Every chosen tool, call and output is kept with the run and exported as `share/tool_calls.json`.
+
+Tool results come from public services and can be incomplete; each service has its own terms of use
+(`app/science_skills/SKILL_LICENSES.md`). Some services allow more requests with a free key (`NCBI_API_KEY`,
+`OPENALEX_API_KEY`, `FDA_API_KEY` in the environment).
+
 ### Export results
 Tick **Export results** (on by default) to download a zip of each run:
 
@@ -58,6 +80,7 @@ Tick **Export results** (on by default) to download a zip of each run:
 | `share/idea_rankNN.html` | one page per idea, with navigation between ranks |
 | `reviews/review_<id>.md` | the review of each idea, with its debates in swarm mode |
 | `references.csv`, `references.md` | every reference, with the idea it belongs to |
+| `share/tool_calls.json` | runs with science tools: each step's chosen tools, calls and output |
 
 References are written by the model, not retrieved, so resolve each one before relying on it.
 
@@ -108,5 +131,9 @@ make lint
 ## Credits and license
 
 This is a fork of [llnl/open-ai-co-scientist](https://github.com/llnl/open-ai-co-scientist) (LLNL-CODE-2010270), whose single co-scientist cycle, interface and run history it builds on. Released under the MIT License (see `LICENSE` and `NOTICE`).
+
+The science tools in `app/science_skills/` are copied unchanged from the open-source
+[science-skills](https://github.com/google-deepmind/science-skills) collection: scripts under the Apache License 2.0,
+other material under CC BY 4.0 (see `app/science_skills/README.md`).
 
 The swarm design follows the tournament, evolution and meta-review of Co-Scientist (Gottweis et al., *Nature*, 2026), the routines and handoffs of OpenAI Swarm, orchestrator-worker research agents, and multi-agent debate (Du et al., 2023).

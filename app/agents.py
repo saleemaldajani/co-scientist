@@ -239,6 +239,13 @@ class GenerationAgent:
                 research_goal.description,
                 step=f"generation {len(context.hypotheses) + 1}",
             )
+        tools = getattr(research_goal, "tools", None)
+        if tools:  # optional science tools: the model writes tool calls, their output goes into this generation prompt
+            prompt += tools.step(
+                lambda p: call_llm(p, temperature=gen_temp, model=research_goal.llm_model),
+                research_goal.description,
+                step=f"generation {len(context.hypotheses) + 1}",
+            )
 
         # Pass the specific temperature and num_hypotheses
         raw_output = call_llm_for_generation(

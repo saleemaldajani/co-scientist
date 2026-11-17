@@ -3,6 +3,7 @@
 Layout:
     <out>/share/ideas_bundle.json   one object per idea (with the direction of the worker that wrote it, or null)
     <out>/share/directions.json     swarm runs: one record per assigned worker, in assignment order ([] otherwise)
+    <out>/share/tool_calls.json     runs with science tools: every step's chosen tools, calls and output ([] otherwise)
     <out>/share/ideas_bundle.md     directions, leaderboard, then every idea (summary, full idea, review, references)
     <out>/share/ideas_bundle.html   the same as one HTML page
     <out>/share/idea_rankNN.html    one page per idea, with navigation between ranks
@@ -220,6 +221,7 @@ def write_bundle(
     model: str = "",
     input_note: str = "the research-goal text only (no files)",
     directions: Optional[List[Dict[str, Any]]] = None,
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Write the bundle to out_dir and a zip next to it; return the zip path.
 
@@ -242,6 +244,9 @@ def write_bundle(
         )
     json.dump(ideas, open(os.path.join(share, "ideas_bundle.json"), "w"), indent=1, ensure_ascii=False, default=str)
     json.dump(directions, open(os.path.join(share, "directions.json"), "w"), indent=1, ensure_ascii=False)
+    json.dump(
+        tool_calls or [], open(os.path.join(share, "tool_calls.json"), "w"), indent=1, ensure_ascii=False, default=str
+    )
 
     lb = [
         "| rank | id | title | elo_rating | novelty | feasibility | debates | tools_used |",
