@@ -156,6 +156,15 @@ def written_files(folder: str, limit: int = 2_000_000) -> str:
     return "\n".join(parts)
 
 
+def fair_shares(sizes: List[int], budget: int) -> List[int]:
+    """Characters each output may keep: all of a short one, and an equal share of what is left for the long ones."""
+    caps, left, todo = [0] * len(sizes), budget, sorted(range(len(sizes)), key=lambda i: sizes[i])
+    for k, i in enumerate(todo):
+        caps[i] = min(sizes[i], left // (len(todo) - k))
+        left -= caps[i]
+    return caps
+
+
 def default_runner(script_path: str, args: List[str], timeout: float) -> Dict[str, Any]:
     """Run one script in a fresh scratch folder and return its exit code and output."""
     env = dict(os.environ)
@@ -194,8 +203,8 @@ class ScienceTools:
         max_calls: int = 3,
         rounds: int = 2,
         timeout: float = 60.0,
-        output_chars: int = 4000,
-        budget: int = 10000,
+        output_chars: int = 6000,
+        budget: int = 12000,
         usage_chars: int = 8000,
         catalog: Optional[Dict[str, Dict[str, Any]]] = None,
         runner: Optional[Callable[[str, List[str], float], Dict[str, Any]]] = None,
@@ -275,8 +284,9 @@ class ScienceTools:
             + "\n\nThe tools again, for follow-up calls:\n\n"
             + "\n\n".join(self.usage(n) for n in chosen)
             + f"\n\nWrite up to {self.max_calls} follow-up calls that get the details this output points to, for "
-            "example the abstracts or records of the most relevant identifiers it returned (articles, genes, proteins, "
-            "compounds, trials). Do not repeat a call above. Return only a JSON array of objects like "
+            "example the abstracts or records of the three to five most relevant identifiers it returned (articles, "
+            "genes, proteins, compounds, trials); each call's output is cut to about "
+            + f"{self.output_chars:,} characters. Do not repeat a call above. Return only a JSON array of objects like "
             '{"tool": "<tool name>", "script": "<script file>", "args": ["<arg>", ...]}, or [] if you have what you need.'
         )
 
@@ -291,8 +301,8 @@ class ScienceTools:
         return dict(tool=tool, script=script, args=args, returncode=res.get("returncode"), output=out)
 
     def block(self, results: List[Dict[str, Any]], budget: Optional[int] = None, preamble: bool = True) -> str:
-        """Every call's output; when they do not all fit, each gets an equal share of the budget (so a follow-up's
-        abstracts are not crowded out by the search that found them)."""
+        """Every call's output; when they do not all fit, short outputs stay whole and the long ones share the rest
+        equally (so a follow-up's abstracts are not crowded out by the search that found them)."""
         budget = budget or self.budget
         parts = []
         for r in results:
@@ -300,9 +310,8 @@ class ScienceTools:
             status = "" if r["returncode"] == 0 else f" (exit code {r['returncode']})"
             label = f"round {r['round']} · " if r.get("round", 1) > 1 else ""
             parts.append(f"### {label}{r['tool']}: {cmd}{status}\n{r['output'] or '(no output)'}")
-        if sum(map(len, parts)) > budget:
-            share = budget // max(1, len(parts))
-            parts = [p if len(p) <= share else p[:share] + "\n[... cut to fit ...]" for p in parts]
+        caps = fair_shares([len(p) for p in parts], budget)
+        parts = [p if len(p) <= c else p[:c] + "\n[... cut to fit ...]" for p, c in zip(parts, caps)]
         head = [PREAMBLE.format(date=datetime.date.today().isoformat())] if preamble else []
         return "\n\n".join(head + parts)
 

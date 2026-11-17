@@ -232,3 +232,11 @@ def test_output_files_come_back_and_tmp_paths_stay_in_the_scratch_folder(tmp_pat
     r = default_runner(str(probe), [local_path("/tmp/res.json")], 30)
     assert r["returncode"] == 0 and "[file res.json]" in r["output"] and '{"hits":3}' in r["output"]
     assert not os.path.exists("/tmp/res.json") or os.path.getmtime("/tmp/res.json") < os.path.getmtime(probe)
+
+
+def test_fair_shares_keep_short_outputs_whole():
+    from app.science_tools import fair_shares
+
+    assert fair_shares([100, 200], 1000) == [100, 200]  # everything fits
+    caps = fair_shares([250, 150, 4000, 6000, 6000], 12000)
+    assert caps[:2] == [250, 150] and sum(caps) <= 12000 and max(caps[2:]) - min(caps[2:]) <= 1

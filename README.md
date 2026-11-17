@@ -65,8 +65,8 @@ command-line help and writes up to three calls. Each call runs one script from `
 limit, in a scratch folder, without a shell, and without the model provider's key. The model then sees that output and
 can make up to three follow-up calls, for example to fetch the abstracts of the articles a PubMed search found or the
 records of the genes and compounds it named (a repeat of an earlier call is skipped). The output of both rounds (and
-any file a call writes) goes into that step's prompt as a TOOL RESULTS block of about 10,000 characters, shared equally
-between calls when it does not all fit. A step with tools makes two or three extra model calls. Every chosen tool,
+any file a call writes) goes into that step's prompt as a TOOL RESULTS block of about 12,000 characters (up to 6,000
+per call; when it does not all fit, short outputs stay whole and the long ones share the rest). A step with tools makes two or three extra model calls. Every chosen tool,
 call and output is kept with the run and exported as `share/tool_calls.json`.
 
 Tool results come from public services and can be incomplete; each service has its own terms of use
