@@ -195,6 +195,13 @@ def default_runner(script_path: str, args: List[str], timeout: float) -> Dict[st
             return dict(returncode=None, output=out + f"\n[stopped after {timeout:.0f} s]")
 
 
+REQUIRE_CHOICE = "\n\nYou must use at least one tool for this step. Return a JSON array of 1 to {n} tool names."
+REQUIRE_CALL = (
+    "\n\nYou must run at least one call for this step. Return a JSON array of 1 to 3 call objects, using the scripts "
+    "and arguments shown above."
+)
+
+
 class ScienceTools:
     def __init__(
         self,
@@ -209,8 +216,14 @@ class ScienceTools:
         catalog: Optional[Dict[str, Dict[str, Any]]] = None,
         runner: Optional[Callable[[str, List[str], float], Dict[str, Any]]] = None,
         skills_dir: str = SKILLS_DIR,
+        require: bool = False,
     ):
-        """enabled: tool names (folder names in app/science_skills/skills); None or empty = every tool."""
+        """enabled: tool names (folder names in app/science_skills/skills); None or empty = every tool.
+
+        require: the model must use at least one tool. It is asked the usual question first, and only when it declines
+        (no tool chosen, or no runnable call written) is it asked once more with "at least one"; the log keeps the
+        declined reply, so a run with require=True still shows whether the model would have used the tools by itself.
+        """
         self.catalog = load_catalog() if catalog is None else catalog
         unknown = [e for e in (enabled or []) if e not in self.catalog]
         if unknown:
@@ -220,6 +233,7 @@ class ScienceTools:
         self.output_chars, self.budget, self.usage_chars = output_chars, budget, usage_chars
         self.runner = runner or default_runner
         self.skills_dir = skills_dir
+        self.require = require
         self.log: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
 
@@ -233,7 +247,7 @@ class ScienceTools:
             f"science tools before each generation step ({n} enabled: {which}): the model picks up to {self.max_skills} "
             f"tools and writes up to {self.max_calls} calls per round in {self.rounds} round(s) (later rounds follow up on "
             f"earlier output), each call limited to {self.timeout:.0f} s; about {self.budget:,} characters of output go "
-            "into the prompt"
+            "into the prompt" + ("; at least one tool call is required" if self.require else "")
         )
 
     # ------------------------------------------------------------------ prompts
@@ -321,6 +335,13 @@ class ScienceTools:
         if len(self.enabled) > self.max_skills:
             rec["choose_reply"] = ask(self.choose_prompt(goal, direction)) or ""
             chosen = parse_choice(rec["choose_reply"], self.enabled, self.max_skills)
+            if self.require and not chosen:
+                rec["declined_choice"] = True
+                again = self.choose_prompt(goal, direction) + REQUIRE_CHOICE.format(n=self.max_skills)
+                rec["choose_reply_required"] = ask(again) or ""
+                chosen = parse_choice(rec["choose_reply_required"], self.enabled, self.max_skills)
+                if not chosen:  # still none: the first tools in the enabled list
+                    chosen, rec["chosen_by_default"] = list(self.enabled[: self.max_skills]), True
         else:
             chosen = list(self.enabled)
         rec["chosen"] = chosen
@@ -334,24 +355,37 @@ class ScienceTools:
                 else self.followup_prompt(goal, chosen, results, direction)
             )
             reply = ask(prompt) or ""
-            seen = {(r["tool"], r["script"], tuple(r["args"])) for r in results}
-            ran, no = [], []
-            for call in _json_array(reply)[: self.max_calls]:
-                why = check_call(call, self.catalog, chosen)
-                key = None if why else (call["tool"], call["script"], tuple(local_path(str(a)) for a in call["args"]))
-                if key in seen:  # in this round or an earlier one
-                    why = "repeats an earlier call"
-                if why:
-                    no.append(dict(call=call, reason=why))
-                    continue
-                seen.add(key)
-                ran.append(dict(self.run_call(call), round=rnd))
-            rec["rounds"].append(dict(round=rnd, reply=reply, results=ran, refused=no))
+            ran, no = self._run_reply(reply, chosen, results, rnd)
+            entry = dict(round=rnd, reply=reply, results=ran, refused=no)
+            # declined, or every call was refused: with require, ask once more for at least one call
+            if self.require and rnd == 1 and not ran:
+                rec["declined_calls"] = True
+                entry["reply_required"] = reply = ask(prompt + REQUIRE_CALL) or ""
+                ran2, no2 = self._run_reply(reply, chosen, results, rnd)
+                ran, no = ran2, no + no2
+                entry.update(results=ran, refused=no)
+            rec["rounds"].append(entry)
             results += ran
             refused += no
             if rnd == 1:
-                rec["calls_reply"] = reply
+                rec["calls_reply"] = entry["reply"]
         rec.update(results=results, refused=refused)
         with self._lock:
             self.log.append(rec)
         return ("\n\n" + self.block(results) + "\n\n") if results else ""
+
+    def _run_reply(self, reply: str, chosen: Sequence[str], earlier: List[Dict[str, Any]], rnd: int):
+        """Check and run the calls in one reply; skip a call that repeats one already run. Returns (ran, refused)."""
+        seen = {(r["tool"], r["script"], tuple(r["args"])) for r in earlier}
+        ran, no = [], []
+        for call in _json_array(reply)[: self.max_calls]:
+            why = check_call(call, self.catalog, chosen)
+            key = None if why else (call["tool"], call["script"], tuple(local_path(str(a)) for a in call["args"]))
+            if key in seen:  # in this round or an earlier one
+                why = "repeats an earlier call"
+            if why:
+                no.append(dict(call=call, reason=why))
+                continue
+            seen.add(key)
+            ran.append(dict(self.run_call(call), round=rnd))
+        return ran, no

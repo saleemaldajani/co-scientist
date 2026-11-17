@@ -240,3 +240,36 @@ def test_fair_shares_keep_short_outputs_whole():
     assert fair_shares([100, 200], 1000) == [100, 200]  # everything fits
     caps = fair_shares([250, 150, 4000, 6000, 6000], 12000)
     assert caps[:2] == [250, 150] and sum(caps) <= 12000 and max(caps[2:]) - min(caps[2:]) <= 1
+
+
+def test_require_asks_again_only_after_a_decline_and_logs_it():
+    ran, asked = [], []
+    call = {"tool": "uniprot_database", "script": "uniprot_tools.py", "args": ["get", "P04637"]}
+
+    def ask(p):
+        asked.append(p)
+        if "Choose up to" in p:
+            return '["uniprot_database"]' if "at least one tool" in p else "[]"
+        if "follow-up calls" in p:
+            return "[]"
+        return json.dumps([call]) if "at least one call" in p else "[]"
+
+    t = ScienceTools(
+        ["uniprot_database", "pubmed_database", "chembl_database"],
+        catalog=CATALOG,
+        runner=fake_runner(ran),
+        require=True,
+    )
+    block = t.step(ask, "goal")
+    rec = t.log[0]
+    assert rec["declined_choice"] and rec["declined_calls"] and rec["chosen"] == ["uniprot_database"]
+    assert rec["choose_reply"] == "[]" and rec["calls_reply"] == "[]" and len(ran) == 1 and "TOOL RESULTS" in block
+    assert len(asked) == 5  # choice, choice again, calls, calls again, follow-up
+    assert "at least one tool call is required" in t.describe()
+    willing = ScienceTools(["uniprot_database"], catalog=CATALOG, runner=fake_runner([]), require=True)
+    willing.step(lambda p: json.dumps([call]), "goal")
+    assert "declined_calls" not in willing.log[0] and "declined_choice" not in willing.log[0]
+    plain = ScienceTools(["uniprot_database"], catalog=CATALOG, runner=fake_runner([]))
+    asked.clear()
+    plain.step(lambda p: asked.append(p) or "[]", "goal")
+    assert len(asked) == 1  # without require a decline is final
