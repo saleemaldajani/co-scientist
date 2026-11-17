@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .agents import call_llm_for_reflection
 from .data_context import DataBundle
+from .science_tools import ScienceTools
 from .utils import call_llm, last_model_used, last_usage, logger, similarity_score
 from .web_search import WebSearch
 
@@ -159,6 +160,7 @@ class SwarmCoScientist:
         data: Optional[DataBundle] = None,
         data_budget: int = 20000,
         web: Optional[WebSearch] = None,
+        tools: Optional[ScienceTools] = None,
     ):
         self.goal, self.model = goal, model
         self.n_workers, self.per_worker, self.rounds = n_workers, per_worker, rounds
@@ -177,6 +179,7 @@ class SwarmCoScientist:
         self._lock = threading.Lock()
         self.data, self.data_budget = (data if data else None), data_budget
         self.web = web
+        self.tools = tools if tools else None
 
     # ------------------------------------------------------------------ plumbing
     def llm(self, role: str, prompt: str, temperature: float) -> str:
@@ -241,6 +244,15 @@ class SwarmCoScientist:
             lambda p: self.llm(f"worker{w + 1} search", p, self.gen_t), self.goal, direction, step=f"worker {w + 1}"
         )
 
+    def tools_block(self, w: int, lens: Dict[str, str]) -> str:
+        """Science tool output for worker w ('' with tools off, so prompts are unchanged)."""
+        if not self.tools:
+            return ""
+        direction = f"{lens.get('name', '')}: {lens.get('objective', '')}"
+        return self.tools.step(
+            lambda p: self.llm(f"worker{w + 1} tools", p, self.gen_t), self.goal, direction, step=f"worker {w + 1}"
+        )
+
     # ------------------------------------------------------------------ routines
     def orchestrate(self) -> List[Dict[str, str]]:
         prompt = (
@@ -271,6 +283,7 @@ class SwarmCoScientist:
                 f"{self.goal[:3000]} {lens.get('name', '')} {lens.get('objective', '')} {lens.get('data_types', '')}"
             )
             + self.web_block(w, lens)
+            + self.tools_block(w, lens)
             + "Please return the response as a JSON array of objects, where each object has a 'title' and 'text' key."
         )
         data, reply = self.ask_json(f"worker{w + 1}", prompt, self.gen_t, list)
@@ -491,9 +504,11 @@ class SwarmCoScientist:
                 k_factor=self.k,
                 data=self.data.summary() if self.data else None,
                 web=self.web.describe() if self.web else None,
+                tools=self.tools.describe() if self.tools else None,
             ),
             lenses=lenses,
             web_search=self.web.log if self.web else [],
+            tool_calls=self.tools.log if self.tools else [],
             hypotheses=list(self.hyps.values()),
             final=[h["id"] for h in final],
             merged=self.merged,

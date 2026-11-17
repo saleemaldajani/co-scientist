@@ -16,6 +16,7 @@ from app.data_context import DataBundle, data_check_html
 from app.export import directions_from_lenses, ideas_from_hypotheses, write_bundle
 from app.models import ContextMemory, ResearchGoal
 from app.run_store import delete_run, get_reports_dir, history_html, list_runs, report_file_url, save_run, write_report
+from app.science_tools import ScienceTools, tool_choices
 from app.swarm import SwarmCoScientist, format_swarm_results
 from app.tools.arxiv_search import ArxivSearchTool
 from app.utils import (
@@ -28,6 +29,7 @@ from app.utils import (
     logger,
     order_free_models_for_demo,
 )
+from app.web_search import WebSearch
 
 # Global state for the Gradio app
 global_context = ContextMemory()
@@ -157,6 +159,26 @@ def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[s
     return message, history_html(), gr.update(choices=history_run_choices(), value=None)
 
 
+TOOL_MODES = ["No tools", "All tools", "Choose tools"]
+WEB_SEARCH_TOOL = "web_search"
+
+
+def build_tools(mode: str, picks: Optional[List[str]] = None) -> Tuple[Optional[ScienceTools], Optional[WebSearch]]:
+    """The run's science tools and web search from the UI choice; (None, None) for No tools, so prompts are unchanged."""
+    if mode == "All tools":
+        return ScienceTools(), WebSearch()
+    if mode == "Choose tools":
+        picks = list(picks or [])
+        names = [p for p in picks if p != WEB_SEARCH_TOOL]
+        return (ScienceTools(names) if names else None), (WebSearch() if WEB_SEARCH_TOOL in picks else None)
+    return None, None
+
+
+def tools_summary(tools: Optional[ScienceTools], web: Optional[WebSearch]) -> str:
+    parts = ([f"{len(tools.enabled)} science tools"] if tools else []) + (["web search"] if web else [])
+    return " + ".join(parts) if parts else "none"
+
+
 def set_research_goal(
     description: str,
     llm_model: str = None,
@@ -166,6 +188,8 @@ def set_research_goal(
     elo_k_factor: int = 32,
     top_k_hypotheses: int = 2,
     data=None,
+    tools=None,
+    web=None,
 ) -> Tuple[str, str]:
     """Set the research goal and initialize the system."""
     global current_research_goal, global_context
@@ -185,6 +209,8 @@ def set_research_goal(
             elo_k_factor=elo_k_factor,
             top_k_hypotheses=top_k_hypotheses,
             data=data,
+            tools=tools,
+            web=web,
         )
 
         # Reset context
@@ -196,6 +222,8 @@ def set_research_goal(
         status_msg = f"✅ Research goal set successfully!\n\n**Goal:** {description}\n**Model:** {current_research_goal.llm_model or 'Default'}\n**Hypotheses per cycle:** {num_hypotheses}"
         if data:
             status_msg += f"\n**Data:** {data.summary()}"
+        if tools or web:
+            status_msg += f"\n**Tools:** {tools_summary(tools, web)}"
 
         return status_msg, "Ready to run first cycle. Click 'Run Cycle' to begin."
 
@@ -292,6 +320,9 @@ def execute_cycle(
 
 def persist_cycle_result(research_goal: ResearchGoal, cycle_result: Dict[str, Any]) -> Tuple[str, str, str]:
     """Persist an accepted cycle result and return Gradio output values."""
+    tools = getattr(research_goal, "tools", None)
+    if tools:  # every tool call this run made, kept with the run
+        cycle_result["cycle_details"]["tool_calls"] = tools.log
     saved_run = save_run(
         research_goal=research_goal,
         cycle_details=cycle_result["cycle_details"],
@@ -419,6 +450,8 @@ def run_swarm_with_progress(
     timeout_seconds: int = SWARM_TIMEOUT_SECONDS,
     poll_seconds: float = CYCLE_PROGRESS_INTERVAL_SECONDS,
     data=None,
+    tools=None,
+    web=None,
 ):
     """Run swarm mode in the background and stream its progress until done or timed out."""
     model = llm_model if llm_model and llm_model != "-- Select Model --" else None
@@ -436,6 +469,8 @@ def run_swarm_with_progress(
         parallel=min(4, int(n_workers)),
         progress=log.append,
         data=data,
+        tools=tools,
+        web=web,
     )
 
     def worker():
@@ -516,6 +551,7 @@ def export_bundle_zip(mode: str) -> Optional[str]:
                 out.name,
                 LAST_SWARM["goal"],
                 directions=directions_from_lenses(res.get("lenses")),  # the records the live Directions list shows
+                tool_calls=res.get("tool_calls"),
                 mode="swarm",
                 model=LAST_SWARM.get("model") or "",
                 input_note=note,
@@ -533,6 +569,7 @@ def export_bundle_zip(mode: str) -> Optional[str]:
             str(out),
             out.name,
             current_research_goal.description,
+            tool_calls=current_research_goal.tools.log if getattr(current_research_goal, "tools", None) else None,
             mode="single",
             model=current_research_goal.llm_model or "",
             input_note=f"research goal + uploaded data: {data.summary()}"
@@ -923,6 +960,23 @@ def create_gradio_interface():
                     "you may share with it."
                 )
 
+                # Science tools (off by default: No tools sends the same prompts as before)
+                with gr.Accordion("🧪 Science tools", open=False):
+                    tools_mode = gr.Radio(
+                        choices=TOOL_MODES,
+                        value="No tools",
+                        label="Tools",
+                        info="Before writing hypotheses, the model can query scientific databases and literature "
+                        "(UniProt, PubMed, ChEMBL, Ensembl, ClinVar, ClinicalTrials.gov and more) and web search. "
+                        "Each step with tools makes two or three extra model calls (choose tools, call them, follow up).",
+                    )
+                    tools_pick = gr.CheckboxGroup(
+                        choices=[("Web search", WEB_SEARCH_TOOL)] + tool_choices(),
+                        value=[],
+                        label="Tools to enable",
+                        visible=False,
+                    )
+
                 # Advanced settings
                 with gr.Accordion("⚙️ Advanced Settings", open=False):
                     default_model = get_default_model_choice()
@@ -1002,6 +1056,7 @@ def create_gradio_interface():
 
                 1. **Enter a research goal**: the question, the data you can use, and what each hypothesis should contain (or load it from a .md/.txt file).
                 2. **Attach data** (optional): tables (.csv, .tsv) and a README; every step sees the parts relevant to it, and quoted numbers are checked against them.
+                   **Science tools** (optional, off by default): let the model query databases, literature and the web before it writes hypotheses; choose all tools or pick them.
                 3. **Choose a mode**: *Single co-scientist* (one generation call per cycle) or *Swarm* (parallel workers ranked by debate).
                 4. **Adjust settings** (optional): model, hypotheses per cycle, and the swarm's workers, rounds and debates.
                 5. **Run**: results appear below; with **Export results** ticked, a zip of .html, .md and .json files is ready to download.
@@ -1062,8 +1117,11 @@ def create_gradio_interface():
             matches=2,
             export=True,
             data_paths=None,
+            tools_mode="No tools",
+            tools_pick=None,
         ):
             data = DataBundle.from_paths(data_paths or []) or None
+            tools, web = build_tools(tools_mode, tools_pick)
             if mode == "Swarm":
                 if not (research_goal or "").strip():
                     yield (
@@ -1076,7 +1134,15 @@ def create_gradio_interface():
                     )
                     return
                 for status, results, references in run_swarm_with_progress(
-                    research_goal.strip(), llm_model, workers, per_worker, rounds, matches, data=data
+                    research_goal.strip(),
+                    llm_model,
+                    workers,
+                    per_worker,
+                    rounds,
+                    matches,
+                    data=data,
+                    tools=tools,
+                    web=web,
                 ):
                     yield (
                         status,
@@ -1106,6 +1172,8 @@ def create_gradio_interface():
                 elo_k_factor,
                 top_k_hypotheses,
                 data=data,
+                tools=tools,
+                web=web,
             )
             yield (
                 f"{status_msg}\n\nStarting cycle with a {format_timeout_duration(CYCLE_TIMEOUT_SECONDS)} limit.",
@@ -1151,6 +1219,8 @@ def create_gradio_interface():
                 swarm_matches,
                 export_checkbox,
                 data_files,
+                tools_mode,
+                tools_pick,
             ],
             outputs=[
                 status_output,
@@ -1184,6 +1254,9 @@ def create_gradio_interface():
 
         goal_file.upload(fn=load_goal_file, inputs=[goal_file], outputs=[research_goal_input])
         data_files.change(fn=describe_data, inputs=[data_files], outputs=[data_status])
+        tools_mode.change(
+            fn=lambda m: gr.update(visible=m == "Choose tools"), inputs=[tools_mode], outputs=[tools_pick]
+        )
 
         demo.load(
             fn=refresh_history_view,
