@@ -245,6 +245,7 @@ class GenerationAgent:
                 lambda p: call_llm(p, temperature=gen_temp, model=research_goal.llm_model),
                 research_goal.description,
                 step=f"generation {len(context.hypotheses) + 1}",
+                data=data.outline() if data else "",
             )
 
         # Pass the specific temperature and num_hypotheses

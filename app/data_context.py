@@ -128,6 +128,20 @@ class DataBundle:
             out += " | skipped: " + "; ".join(self.skipped)
         return out
 
+    def outline(self, max_chars: int = 2000) -> str:
+        """One line per file (name, size, column names): what a step that does not see the data needs to know of it."""
+        lines = []
+        for f in self.files:
+            if f.kind == "table":
+                cols = ", ".join(f.header)
+                if len(cols) > 300:
+                    cols = cols[:297] + "..."
+                lines.append(f"- {f.name}: {f.n_rows:,} rows; columns: {cols}")
+            else:
+                lines.append(f"- {f.name}: text, {len(f.text):,} characters")
+        out = "\n".join(lines)
+        return out if len(out) <= max_chars else out[: max_chars - 25] + "\n[... more files ...]"
+
     # ------------------------------------------------------------------ extract for a prompt
     def _relevance(self, f: DataFile, query: str) -> List[float]:
         if f.name not in self._idf:

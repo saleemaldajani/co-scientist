@@ -195,6 +195,14 @@ def default_runner(script_path: str, args: List[str], timeout: float) -> Dict[st
             return dict(returncode=None, output=out + f"\n[stopped after {timeout:.0f} s]")
 
 
+DATA_NOTE = (
+    "Attached data: the user attached the files below. You will see their contents in the next step, where you "
+    "propose hypotheses; the tools cannot read them. Choose tools and calls that add to these files, for example "
+    "published analyses or records they do not contain.\n{outline}"
+)
+# provider notices addressed to AI agents (one asked agents to send their user's email for an API key): never shown
+_AGENT_NOTICE = re.compile(r'\s*"notice"\s*:\s*"(?:[^"\\]|\\.)*"\s*,?')
+
 REQUIRE_CHOICE = "\n\nYou must use at least one tool for this step. Return a JSON array of 1 to {n} tool names."
 REQUIRE_CALL = (
     "\n\nYou must run at least one call for this step. Return a JSON array of 1 to 3 call objects, using the scripts "
@@ -251,13 +259,17 @@ class ScienceTools:
         )
 
     # ------------------------------------------------------------------ prompts
-    def _head(self, goal: str, direction: str) -> str:
-        return f"Research Goal: {goal}\n\n" + (f"Your direction: {direction}\n\n" if direction else "")
+    def _head(self, goal: str, direction: str, data: str = "") -> str:
+        return (
+            f"Research Goal: {goal}\n\n"
+            + (f"Your direction: {direction}\n\n" if direction else "")
+            + (DATA_NOTE.format(outline=data) + "\n\n" if data else "")
+        )
 
-    def choose_prompt(self, goal: str, direction: str = "") -> str:
+    def choose_prompt(self, goal: str, direction: str = "", data: str = "") -> str:
         lines = [f"- {n}: {self.catalog[n]['description']}" for n in self.enabled]
         return (
-            self._head(goal, direction)
+            self._head(goal, direction, data)
             + "Before you propose hypotheses you can query scientific databases and tools. The tools are:\n"
             + "\n".join(lines)
             + f"\n\nChoose up to {self.max_skills} tools whose results would most help you propose and test hypotheses "
@@ -276,9 +288,9 @@ class ScienceTools:
         text = "\n\n".join(parts)
         return text if len(text) <= self.usage_chars else text[: self.usage_chars] + "\n[... usage cut ...]"
 
-    def calls_prompt(self, goal: str, chosen: Sequence[str], direction: str = "") -> str:
+    def calls_prompt(self, goal: str, chosen: Sequence[str], direction: str = "", data: str = "") -> str:
         return (
-            self._head(goal, direction)
+            self._head(goal, direction, data)
             + "Before you propose hypotheses you can run these scientific tools. Each call runs one script with "
             "command-line arguments, with no shell (no pipes, redirects or files from earlier calls), and returns what "
             "it prints and the contents of any files it writes (give output files a plain name, such as result.json)."
@@ -290,9 +302,11 @@ class ScienceTools:
             "or [] if no call would help."
         )
 
-    def followup_prompt(self, goal: str, chosen: Sequence[str], done: List[Dict[str, Any]], direction: str = "") -> str:
+    def followup_prompt(
+        self, goal: str, chosen: Sequence[str], done: List[Dict[str, Any]], direction: str = "", data: str = ""
+    ) -> str:
         return (
-            self._head(goal, direction)
+            self._head(goal, direction, data)
             + "You ran these tool calls before proposing hypotheses. Their output so far:\n\n"
             + self.block(done, budget=self.budget // 2, preamble=False)
             + "\n\nThe tools again, for follow-up calls:\n\n"
@@ -309,7 +323,7 @@ class ScienceTools:
         tool, script, args = call["tool"], call["script"], [local_path(str(a)) for a in call.get("args", [])]
         path = os.path.join(self.skills_dir, "skills", tool, "scripts", script)
         res = self.runner(path, args, self.timeout)
-        out = (res.get("output") or "").strip()
+        out = _AGENT_NOTICE.sub("", res.get("output") or "").strip()
         if len(out) > self.output_chars:
             out = out[: self.output_chars] + f"\n[... {len(out) - self.output_chars:,} more characters cut ...]"
         return dict(tool=tool, script=script, args=args, returncode=res.get("returncode"), output=out)
@@ -329,19 +343,22 @@ class ScienceTools:
         head = [PREAMBLE.format(date=datetime.date.today().isoformat())] if preamble else []
         return "\n\n".join(head + parts)
 
-    def step(self, ask: Callable[[str], str], goal: str, direction: str = "", step: str = "") -> str:
-        """Choose tools, ask for calls, run them, log everything; return the block for the step's prompt ('' if none ran)."""
+    def step(self, ask: Callable[[str], str], goal: str, direction: str = "", step: str = "", data: str = "") -> str:
+        """Choose tools, ask for calls, run them, log everything; return the block for the step's prompt ('' if none ran).
+
+        data: an outline of the attached files (DataBundle.outline()), so the model knows the data exists although the
+        tool prompts do not carry it."""
         rec: Dict[str, Any] = dict(step=step, direction=direction)
         if len(self.enabled) > self.max_skills:
-            rec["choose_reply"] = ask(self.choose_prompt(goal, direction)) or ""
+            rec["choose_reply"] = ask(self.choose_prompt(goal, direction, data)) or ""
             chosen = parse_choice(rec["choose_reply"], self.enabled, self.max_skills)
             if self.require and not chosen:
                 rec["declined_choice"] = True
-                again = self.choose_prompt(goal, direction) + REQUIRE_CHOICE.format(n=self.max_skills)
+                again = self.choose_prompt(goal, direction, data) + REQUIRE_CHOICE.format(n=self.max_skills)
                 rec["choose_reply_required"] = ask(again) or ""
                 chosen = parse_choice(rec["choose_reply_required"], self.enabled, self.max_skills)
-                if not chosen:  # still none: the first tools in the enabled list
-                    chosen, rec["chosen_by_default"] = list(self.enabled[: self.max_skills]), True
+                if not chosen:  # declined twice: no tools for this step (never tools the model did not pick)
+                    rec["declined_after_require"] = True
         else:
             chosen = list(self.enabled)
         rec["chosen"] = chosen
@@ -350,9 +367,9 @@ class ScienceTools:
             if not chosen or (rnd > 1 and not results):  # a follow-up needs output to follow up on
                 break
             prompt = (
-                self.calls_prompt(goal, chosen, direction)
+                self.calls_prompt(goal, chosen, direction, data)
                 if rnd == 1
-                else self.followup_prompt(goal, chosen, results, direction)
+                else self.followup_prompt(goal, chosen, results, direction, data)
             )
             reply = ask(prompt) or ""
             ran, no = self._run_reply(reply, chosen, results, rnd)

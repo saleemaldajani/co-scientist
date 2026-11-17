@@ -250,7 +250,11 @@ class SwarmCoScientist:
             return ""
         direction = f"{lens.get('name', '')}: {lens.get('objective', '')}"
         return self.tools.step(
-            lambda p: self.llm(f"worker{w + 1} tools", p, self.gen_t), self.goal, direction, step=f"worker {w + 1}"
+            lambda p: self.llm(f"worker{w + 1} tools", p, self.gen_t),
+            self.goal,
+            direction,
+            step=f"worker {w + 1}",
+            data=self.data.outline() if self.data else "",
         )
 
     # ------------------------------------------------------------------ routines
