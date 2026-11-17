@@ -62,9 +62,12 @@ swarm worker), the model can then query 32 scientific databases and literature s
 
 With many tools on, the model first picks up to two that fit the goal (or the worker's direction), then reads their
 command-line help and writes up to three calls. Each call runs one script from `app/science_skills/` with a 60-second
-limit, in a scratch folder, without a shell, and without the model provider's key. Its output (and any file it writes)
-goes into that step's prompt as a TOOL RESULTS block of about 8,000 characters. A step with tools makes one or two
-extra model calls. Every chosen tool, call and output is kept with the run and exported as `share/tool_calls.json`.
+limit, in a scratch folder, without a shell, and without the model provider's key. The model then sees that output and
+can make up to three follow-up calls, for example to fetch the abstracts of the articles a PubMed search found or the
+records of the genes and compounds it named (a repeat of an earlier call is skipped). The output of both rounds (and
+any file a call writes) goes into that step's prompt as a TOOL RESULTS block of about 10,000 characters, shared equally
+between calls when it does not all fit. A step with tools makes two or three extra model calls. Every chosen tool,
+call and output is kept with the run and exported as `share/tool_calls.json`.
 
 Tool results come from public services and can be incomplete; each service has its own terms of use
 (`app/science_skills/SKILL_LICENSES.md`). Some services allow more requests with a free key (`NCBI_API_KEY`,

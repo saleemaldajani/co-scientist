@@ -8,7 +8,10 @@ single-mode generation call; each swarm worker) first:
 2. shows the model those tools' command lines (each script's --help text and the examples from its SKILL.md) and asks
    for up to `max_calls` calls as JSON: {"tool": ..., "script": ..., "args": [...]},
 3. runs each call as `python <script> <args>` (no shell, a time limit, a scratch folder, only scripts of enabled
-   tools), and puts the output into that step's prompt as a TOOL RESULTS block, cut to a character budget.
+   tools),
+4. shows the model that output and asks for up to `max_calls` follow-up calls (for example, the abstracts of the
+   articles a search found), runs them the same way (`rounds` = 2; 1 turns follow-ups off; skipped if no call ran),
+5. puts the output of both rounds into that step's prompt as a TOOL RESULTS block, cut to a character budget.
 
 Nothing else changes, so a run with tools off sends exactly the prompts it sent before. Every request, call and
 output is kept in `ScienceTools.log`, so a reader can check where a claim came from.
@@ -142,7 +145,12 @@ def written_files(folder: str, limit: int = 2_000_000) -> str:
                 if size > limit:
                     raise UnicodeDecodeError("", b"", 0, 1, "large")
                 with open(p, encoding="utf-8") as fh:
-                    parts.append(f"[file {rel}]\n{fh.read()}")
+                    text = fh.read()
+                try:  # JSON without its indentation: the same content in far fewer characters of the prompt
+                    text = json.dumps(json.loads(text), ensure_ascii=False, separators=(",", ":"))
+                except ValueError:
+                    pass
+                parts.append(f"[file {rel}]\n{text}")
             except UnicodeDecodeError:
                 parts.append(f"[file {rel}: {size:,} bytes, not shown]")
     return "\n".join(parts)
@@ -184,9 +192,10 @@ class ScienceTools:
         enabled: Optional[Sequence[str]] = None,
         max_skills: int = 2,
         max_calls: int = 3,
+        rounds: int = 2,
         timeout: float = 60.0,
         output_chars: int = 4000,
-        budget: int = 8000,
+        budget: int = 10000,
         usage_chars: int = 8000,
         catalog: Optional[Dict[str, Dict[str, Any]]] = None,
         runner: Optional[Callable[[str, List[str], float], Dict[str, Any]]] = None,
@@ -198,7 +207,7 @@ class ScienceTools:
         if unknown:
             raise ValueError(f"unknown science tools: {unknown}")
         self.enabled = list(enabled) if enabled else sorted(self.catalog)
-        self.max_skills, self.max_calls, self.timeout = max_skills, max_calls, timeout
+        self.max_skills, self.max_calls, self.rounds, self.timeout = max_skills, max_calls, max(1, rounds), timeout
         self.output_chars, self.budget, self.usage_chars = output_chars, budget, usage_chars
         self.runner = runner or default_runner
         self.skills_dir = skills_dir
@@ -213,8 +222,9 @@ class ScienceTools:
         which = "all" if n == len(self.catalog) else ", ".join(self.enabled)
         return (
             f"science tools before each generation step ({n} enabled: {which}): the model picks up to {self.max_skills} "
-            f"tools and writes up to {self.max_calls} calls, each limited to {self.timeout:.0f} s; about {self.budget:,} "
-            "characters of output go into the prompt"
+            f"tools and writes up to {self.max_calls} calls per round in {self.rounds} round(s) (later rounds follow up on "
+            f"earlier output), each call limited to {self.timeout:.0f} s; about {self.budget:,} characters of output go "
+            "into the prompt"
         )
 
     # ------------------------------------------------------------------ prompts
@@ -257,6 +267,19 @@ class ScienceTools:
             "or [] if no call would help."
         )
 
+    def followup_prompt(self, goal: str, chosen: Sequence[str], done: List[Dict[str, Any]], direction: str = "") -> str:
+        return (
+            self._head(goal, direction)
+            + "You ran these tool calls before proposing hypotheses. Their output so far:\n\n"
+            + self.block(done, budget=self.budget // 2, preamble=False)
+            + "\n\nThe tools again, for follow-up calls:\n\n"
+            + "\n\n".join(self.usage(n) for n in chosen)
+            + f"\n\nWrite up to {self.max_calls} follow-up calls that get the details this output points to, for "
+            "example the abstracts or records of the most relevant identifiers it returned (articles, genes, proteins, "
+            "compounds, trials). Do not repeat a call above. Return only a JSON array of objects like "
+            '{"tool": "<tool name>", "script": "<script file>", "args": ["<arg>", ...]}, or [] if you have what you need.'
+        )
+
     # ------------------------------------------------------------------ running
     def run_call(self, call: Dict[str, Any]) -> Dict[str, Any]:
         tool, script, args = call["tool"], call["script"], [local_path(str(a)) for a in call.get("args", [])]
@@ -267,19 +290,21 @@ class ScienceTools:
             out = out[: self.output_chars] + f"\n[... {len(out) - self.output_chars:,} more characters cut ...]"
         return dict(tool=tool, script=script, args=args, returncode=res.get("returncode"), output=out)
 
-    def block(self, results: List[Dict[str, Any]]) -> str:
-        out, used = [PREAMBLE.format(date=datetime.date.today().isoformat())], 0
+    def block(self, results: List[Dict[str, Any]], budget: Optional[int] = None, preamble: bool = True) -> str:
+        """Every call's output; when they do not all fit, each gets an equal share of the budget (so a follow-up's
+        abstracts are not crowded out by the search that found them)."""
+        budget = budget or self.budget
+        parts = []
         for r in results:
             cmd = " ".join([r["script"], *[json.dumps(a) if " " in a else a for a in r["args"]]])
             status = "" if r["returncode"] == 0 else f" (exit code {r['returncode']})"
-            part = f"### {r['tool']}: {cmd}{status}\n{r['output'] or '(no output)'}"
-            if used + len(part) > self.budget:
-                part = part[: max(0, self.budget - used)] + "\n[... cut to fit ...]"
-            out.append(part)
-            used += len(part)
-            if used >= self.budget:
-                break
-        return "\n\n".join(out)
+            label = f"round {r['round']} · " if r.get("round", 1) > 1 else ""
+            parts.append(f"### {label}{r['tool']}: {cmd}{status}\n{r['output'] or '(no output)'}")
+        if sum(map(len, parts)) > budget:
+            share = budget // max(1, len(parts))
+            parts = [p if len(p) <= share else p[:share] + "\n[... cut to fit ...]" for p in parts]
+        head = [PREAMBLE.format(date=datetime.date.today().isoformat())] if preamble else []
+        return "\n\n".join(head + parts)
 
     def step(self, ask: Callable[[str], str], goal: str, direction: str = "", step: str = "") -> str:
         """Choose tools, ask for calls, run them, log everything; return the block for the step's prompt ('' if none ran)."""
@@ -290,15 +315,33 @@ class ScienceTools:
         else:
             chosen = list(self.enabled)
         rec["chosen"] = chosen
-        results, refused = [], []
-        if chosen:
-            rec["calls_reply"] = ask(self.calls_prompt(goal, chosen, direction)) or ""
-            for call in _json_array(rec["calls_reply"])[: self.max_calls]:
+        results, refused, rec["rounds"] = [], [], []
+        for rnd in range(1, self.rounds + 1):
+            if not chosen or (rnd > 1 and not results):  # a follow-up needs output to follow up on
+                break
+            prompt = (
+                self.calls_prompt(goal, chosen, direction)
+                if rnd == 1
+                else self.followup_prompt(goal, chosen, results, direction)
+            )
+            reply = ask(prompt) or ""
+            seen = {(r["tool"], r["script"], tuple(r["args"])) for r in results}
+            ran, no = [], []
+            for call in _json_array(reply)[: self.max_calls]:
                 why = check_call(call, self.catalog, chosen)
+                key = None if why else (call["tool"], call["script"], tuple(local_path(str(a)) for a in call["args"]))
+                if key in seen:  # in this round or an earlier one
+                    why = "repeats an earlier call"
                 if why:
-                    refused.append(dict(call=call, reason=why))
+                    no.append(dict(call=call, reason=why))
                     continue
-                results.append(self.run_call(call))
+                seen.add(key)
+                ran.append(dict(self.run_call(call), round=rnd))
+            rec["rounds"].append(dict(round=rnd, reply=reply, results=ran, refused=no))
+            results += ran
+            refused += no
+            if rnd == 1:
+                rec["calls_reply"] = reply
         rec.update(results=results, refused=refused)
         with self._lock:
             self.log.append(rec)

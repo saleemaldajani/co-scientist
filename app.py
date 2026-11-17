@@ -968,7 +968,7 @@ def create_gradio_interface():
                         label="Tools",
                         info="Before writing hypotheses, the model can query scientific databases and literature "
                         "(UniProt, PubMed, ChEMBL, Ensembl, ClinVar, ClinicalTrials.gov and more) and web search. "
-                        "Each step with tools makes one or two extra model calls.",
+                        "Each step with tools makes two or three extra model calls (choose tools, call them, follow up).",
                     )
                     tools_pick = gr.CheckboxGroup(
                         choices=[("Web search", WEB_SEARCH_TOOL)] + tool_choices(),

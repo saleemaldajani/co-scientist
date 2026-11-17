@@ -65,6 +65,9 @@ def test_step_chooses_then_runs_calls_and_logs():
         asked.append(p)
         if "Choose up to" in p:
             return '["uniprot_database"]'
+        if "follow-up calls" in p:  # round 2 sees round 1's output and asks for the details it points to
+            assert "P04637 TP53 result for get P04637" in p
+            return json.dumps([{"tool": "uniprot_database", "script": "uniprot_tools.py", "args": ["get", "P38398"]}])
         return json.dumps(
             [
                 {"tool": "uniprot_database", "script": "uniprot_tools.py", "args": ["get", "P04637"]},
@@ -75,10 +78,38 @@ def test_step_chooses_then_runs_calls_and_logs():
     t = ScienceTools(catalog=CATALOG, runner=fake_runner(ran))  # every tool enabled
     block = t.step(ask, "Find drivers of tumour suppression", step="generation 1")
     assert block.strip().startswith("TOOL RESULTS") and "uniprot_tools.py get P04637" in block
-    assert ran == [("uniprot_tools.py", ["get", "P04637"])]
+    assert ran == [("uniprot_tools.py", ["get", "P04637"]), ("uniprot_tools.py", ["get", "P38398"])]
     assert "uniprot_tools.py" in asked[1] and "usage" in asked[1].lower()  # the chosen tool's --help is shown
+    assert len(asked) == 3 and "round 2 · uniprot_database: uniprot_tools.py get P38398" in block
     rec = t.log[0]
-    assert rec["chosen"] == ["uniprot_database"] and len(rec["results"]) == 1 and len(rec["refused"]) == 1
+    assert rec["chosen"] == ["uniprot_database"] and len(rec["results"]) == 2 and len(rec["refused"]) == 1
+    assert [len(r["results"]) for r in rec["rounds"]] == [1, 1]
+
+
+def test_followup_skips_repeats_and_runs_only_after_output():
+    ran, asked = [], []
+    call = {"tool": "uniprot_database", "script": "uniprot_tools.py", "args": ["get", "P04637"]}
+    t = ScienceTools(["uniprot_database"], catalog=CATALOG, runner=fake_runner(ran))
+    t.step(lambda p: asked.append(p) or json.dumps([call, call]), "goal")  # the same call twice, then again in round 2
+    assert len(ran) == 1 and len(asked) == 2
+    assert [r["reason"] for r in t.log[0]["refused"]] == ["repeats an earlier call"] * 3  # 1 in round 1, 2 in round 2
+    asked.clear()
+    t.step(lambda p: asked.append(p) or "[]", "goal")  # nothing ran in round 1: no follow-up call
+    assert len(asked) == 1
+    one = ScienceTools(["uniprot_database"], catalog=CATALOG, runner=fake_runner([]), rounds=1)
+    asked.clear()
+    one.step(lambda p: asked.append(p) or json.dumps([call]), "goal")
+    assert len(asked) == 1 and len(one.log[0]["rounds"]) == 1
+
+
+def test_block_shares_the_budget_between_calls():
+    t = ScienceTools(["uniprot_database"], catalog=CATALOG, budget=1000)
+    res = [
+        dict(tool="uniprot_database", script="uniprot_tools.py", args=[str(i)], returncode=0, output="y" * 900, round=i)
+        for i in (1, 2)
+    ]
+    b = t.block(res)
+    assert b.count("cut to fit") == 2 and "round 2 · uniprot_database" in b
 
 
 def test_few_enabled_tools_skip_the_choice_call():
@@ -158,7 +189,7 @@ def test_swarm_each_worker_uses_tools(monkeypatch):
     workers = [p for p in prompts if "You are worker" in p]
     assert len(workers) == 2 and all("TOOL RESULTS" in p for p in workers)
     assert len(res["tool_calls"]) == 2 and res["settings"]["tools"].startswith("science tools")
-    assert sum(t["role"].endswith("tools") for t in res.get("trace", [])) == 2
+    assert sum(t["role"].endswith("tools") for t in res.get("trace", [])) == 4  # calls + follow-up, per worker
 
 
 def test_swarm_unchanged_without_tools():
@@ -199,5 +230,5 @@ def test_output_files_come_back_and_tmp_paths_stay_in_the_scratch_folder(tmp_pat
     probe = tmp_path / "writer.py"
     probe.write_text("import sys; open(sys.argv[1], 'w').write('{\"hits\": 3}'); print('Success! Data written')")
     r = default_runner(str(probe), [local_path("/tmp/res.json")], 30)
-    assert r["returncode"] == 0 and "[file res.json]" in r["output"] and '"hits": 3' in r["output"]
+    assert r["returncode"] == 0 and "[file res.json]" in r["output"] and '{"hits":3}' in r["output"]
     assert not os.path.exists("/tmp/res.json") or os.path.getmtime("/tmp/res.json") < os.path.getmtime(probe)
