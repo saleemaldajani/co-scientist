@@ -17,6 +17,7 @@ from app.export import directions_from_lenses, ideas_from_hypotheses, write_bund
 from app.models import ContextMemory, ResearchGoal
 from app.run_store import delete_run, get_reports_dir, history_html, list_runs, report_file_url, save_run, write_report
 from app.science_tools import ScienceTools, tool_choices
+from app.simulation import SimulationLab, format_simulation_html, server_choices, server_from_choice
 from app.swarm import SwarmCoScientist, format_swarm_results
 from app.tools.arxiv_search import ArxivSearchTool
 from app.utils import (
@@ -172,6 +173,42 @@ def build_tools(mode: str, picks: Optional[List[str]] = None) -> Tuple[Optional[
         names = [p for p in picks if p != WEB_SEARCH_TOOL]
         return (ScienceTools(names) if names else None), (WebSearch() if WEB_SEARCH_TOOL in picks else None)
     return None, None
+
+
+def build_simulation(choice: str, data_paths: Optional[List[str]] = None) -> Optional[SimulationLab]:
+    """The run's simulation check from the UI choice; None for No simulation, so runs are unchanged. The records lab
+    reads the attached tables, copied into a folder of their own."""
+    key = server_from_choice(choice or "")
+    if not key:
+        return None
+    data_dir = None
+    if key == "records":
+        import shutil
+        import tempfile
+
+        tables = [p for p in data_paths or [] if str(p).lower().endswith((".csv", ".tsv"))]
+        if not tables:
+            raise ValueError("The records lab computes from attached tables: attach .csv or .tsv files first.")
+        data_dir = tempfile.mkdtemp(prefix="records_lab_")
+        for p in tables:
+            shutil.copy(p, os.path.join(data_dir, os.path.basename(p)))
+    return SimulationLab(key, data_dir=data_dir)
+
+
+def simulation_check_single(sim: SimulationLab, goal: ResearchGoal, context: ContextMemory) -> str:
+    """Check the top single-mode hypotheses with the simulation server; return the HTML section."""
+    from app.utils import call_llm
+
+    hs = sorted(context.hypotheses.values(), key=lambda h: -(h.elo_score or 0))
+    ideas = [dict(id=h.hypothesis_id, title=h.title, text=h.text, elo=h.elo_score) for h in hs]
+    data = getattr(goal, "data", None)
+    res = sim.check(
+        lambda p: call_llm(p, temperature=0.3, model=goal.llm_model),
+        goal.description,
+        ideas,
+        data=data.outline() if data else "",
+    )
+    return format_simulation_html(res) or "<p>Simulation check: no idea could be checked.</p>"
 
 
 def tools_summary(tools: Optional[ScienceTools], web: Optional[WebSearch]) -> str:
@@ -452,6 +489,7 @@ def run_swarm_with_progress(
     data=None,
     tools=None,
     web=None,
+    sim=None,
 ):
     """Run swarm mode in the background and stream its progress until done or timed out."""
     model = llm_model if llm_model and llm_model != "-- Select Model --" else None
@@ -471,6 +509,7 @@ def run_swarm_with_progress(
         data=data,
         tools=tools,
         web=web,
+        sim=sim,
     )
 
     def worker():
@@ -977,6 +1016,19 @@ def create_gradio_interface():
                         visible=False,
                     )
 
+                # Simulation check (off by default): the top ideas are tested with simulation tools over MCP
+                with gr.Accordion("🔬 Simulation check", open=False):
+                    sim_mode = gr.Radio(
+                        choices=server_choices(),
+                        value="No simulation",
+                        label="Simulation server",
+                        info="After ranking, each of the top 3 ideas gets a simulation question; the model calls the "
+                        "server's tools, reads the computed results, gives a verdict (supported, inconclusive or refuted) "
+                        "and rewrites the idea so its numbers agree with the results. The records lab computes from the "
+                        "attached tables; the team lab simulates specialist and generalist teams. About two extra model "
+                        "calls per checked idea.",
+                    )
+
                 # Advanced settings
                 with gr.Accordion("⚙️ Advanced Settings", open=False):
                     default_model = get_default_model_choice()
@@ -1119,9 +1171,15 @@ def create_gradio_interface():
             data_paths=None,
             tools_mode="No tools",
             tools_pick=None,
+            sim_mode="No simulation",
         ):
             data = DataBundle.from_paths(data_paths or []) or None
             tools, web = build_tools(tools_mode, tools_pick)
+            try:
+                sim = build_simulation(sim_mode, data_paths)
+            except ValueError as e:
+                yield (f"❌ {e}", "", "", history_html(), gr.update(choices=history_run_choices(), value=None), None)
+                return
             if mode == "Swarm":
                 if not (research_goal or "").strip():
                     yield (
@@ -1143,6 +1201,7 @@ def create_gradio_interface():
                     data=data,
                     tools=tools,
                     web=web,
+                    sim=sim,
                 ):
                     yield (
                         status,
@@ -1192,6 +1251,27 @@ def create_gradio_interface():
                     gr.update(choices=history_run_choices(), value=None),
                     None,
                 )
+            if sim and current_research_goal is not None and global_context.hypotheses:
+                yield (
+                    f"{status_msg}\n\n{status}\n\n🔬 Running the simulation check on the top ideas...",
+                    results,
+                    references,
+                    history_html(),
+                    gr.update(choices=history_run_choices(), value=None),
+                    None,
+                )
+                try:
+                    results = (results or "") + simulation_check_single(sim, current_research_goal, global_context)
+                except Exception as e:  # the ranked ideas stay; report why the check did not run
+                    results = (results or "") + f"<p>⚠️ Simulation check failed: {e}</p>"
+                yield (
+                    f"{status_msg}\n\n{status}",
+                    results,
+                    references,
+                    history_html(),
+                    gr.update(choices=history_run_choices(), value=None),
+                    None,
+                )
             if export:
                 yield (
                     f"{status_msg}\n\n{status}",
@@ -1221,6 +1301,7 @@ def create_gradio_interface():
                 data_files,
                 tools_mode,
                 tools_pick,
+                sim_mode,
             ],
             outputs=[
                 status_output,

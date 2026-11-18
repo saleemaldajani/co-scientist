@@ -73,6 +73,24 @@ Tool results come from public services and can be incomplete; each service has i
 (`app/science_skills/SKILL_LICENSES.md`). Some services allow more requests with a free key (`NCBI_API_KEY`,
 `OPENALEX_API_KEY`, `FDA_API_KEY` in the environment).
 
+### Simulation check
+Under **🔬 Simulation check**, choose **No simulation** (the default: runs are exactly as before) or a simulation
+server. After a run has ranked its ideas, each of the top three goes through four steps: the app lists the server's
+tools over the Model Context Protocol (MCP); the model writes a simulation question that would test the idea and up to
+three tool calls that answer it; the calls run in a separate server process; and the model reads the computed results,
+gives a verdict (supported, inconclusive or refuted) with the numbers, and rewrites the idea so every number it states
+agrees with the results. An unreadable plan is asked for once more, and an idea none of whose calls ran is left unchanged and marked inconclusive, never judged without a result. Checked ideas are listed by verdict, supported first. Two servers ship with the app
+(`app/sim_servers/`):
+
+- **Records lab** computes from the attached tables: rates and ratios by group, rate ratios with 95% intervals, and,
+  for the London cholera records, a held-out test of the water-supplier explanation, an elevation test, the change
+  between the 1849 and 1854 epidemics, and a simulation of the Broad Street outbreak without the handle removal.
+- **Team lab** simulates teams of specialists and generalists completing multi-skill tasks (Monte Carlo), for goals
+  about how to organize teams.
+
+Any stdio MCP server can be used from Python with `SimulationLab(command=[...])`. Servers run without the model
+provider's key. Each checked idea costs about two extra model calls.
+
 ### Export results
 Tick **Export results** (on by default) to download a zip of each run:
 

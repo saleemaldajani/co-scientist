@@ -161,6 +161,7 @@ class SwarmCoScientist:
         data_budget: int = 20000,
         web: Optional[WebSearch] = None,
         tools: Optional[ScienceTools] = None,
+        sim: Optional[Any] = None,
     ):
         self.goal, self.model = goal, model
         self.n_workers, self.per_worker, self.rounds = n_workers, per_worker, rounds
@@ -180,6 +181,7 @@ class SwarmCoScientist:
         self.data, self.data_budget = (data if data else None), data_budget
         self.web = web
         self.tools = tools if tools else None
+        self.sim = sim  # optional SimulationLab (app.simulation): checks the final ranking with simulation tools
 
     # ------------------------------------------------------------------ plumbing
     def llm(self, role: str, prompt: str, temperature: float) -> str:
@@ -493,6 +495,18 @@ class SwarmCoScientist:
         if self.data:
             for h in self.hyps.values():
                 h["data_check"] = self.data.check_numbers(h["title"] + "\n" + h["text"])
+        simulation = None
+        if self.sim and final:
+            ideas = [
+                dict(id=h["id"], title=h["title"], text=h["text"], elo=h["elo"], worker=h.get("worker")) for h in final
+            ]
+            simulation = self.sim.check(
+                lambda p: self.llm("simulation", p, self.judge_t),
+                self.goal,
+                ideas,
+                data=self.data.outline() if self.data else "",
+                progress=self.progress,
+            )
         self.progress(f"done: {len(self.trace)} LLM calls in {time.time() - t0:.0f}s")
         return dict(
             settings=dict(
@@ -509,10 +523,12 @@ class SwarmCoScientist:
                 data=self.data.summary() if self.data else None,
                 web=self.web.describe() if self.web else None,
                 tools=self.tools.describe() if self.tools else None,
+                simulation=self.sim.describe() if self.sim else None,
             ),
             lenses=lenses,
             web_search=self.web.log if self.web else [],
             tool_calls=self.tools.log if self.tools else [],
+            simulation=simulation,
             hypotheses=list(self.hyps.values()),
             final=[h["id"] for h in final],
             merged=self.merged,
@@ -574,6 +590,10 @@ def format_swarm_results(result: Dict[str, Any]) -> str:
             + (data_check_html(h["data_check"]) if "data_check" in h else "")
             + f"<p><i>Review:</i> {H.escape(' | '.join(h['review_comments']))}</p></details>"
         )
+    if result.get("simulation"):
+        from .simulation import format_simulation_html
+
+        out.append(format_simulation_html(result["simulation"]))
     for m in result["meta_reviews"]:
         out.append(
             f"<h3>Meta-review, round {m['round']}</h3><ul>"
