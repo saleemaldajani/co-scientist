@@ -40,6 +40,16 @@ def test_records_lab_computes_rates_ratios_and_a_held_out_test(tmp_path):
     assert t["subdistricts_tested"] == 4 and t["supplier_better_in"] == 4
     assert t["supplier_log_loss_per_death"] < t["baseline_log_loss_per_death"]
     assert "error" in lab.elevation_test() and "error" in lab.simulate_handle_removal()  # files absent: say so
+    (tmp_path / "soho_daily_outbreak.csv").write_text(
+        "date,fatal_cholera_attacks_by_onset,record_type\n"
+        + "".join(
+            f"1854-09-{d:02d},{v},dated\n" for d, v in zip(range(1, 13), [5, 10, 20, 40, 80, 60, 40, 30, 20, 15, 10, 5])
+        )
+    )
+    rising = lab.simulate_handle_removal(removal_date="1854-09-06")["no_effect_simulation"]
+    falling = lab.simulate_handle_removal(removal_date="1854-09-11")["no_effect_simulation"]
+    assert rising["projected_onsets_after_removal_if_no_effect"] is None and "rising" in rising["note"]
+    assert 0 < falling["projected_onsets_after_removal_if_no_effect"] < 20 and falling["daily_decline_pct"] > 0
     assert "unknown column" in lab.group_rates("totals.csv", "nope", "cholera_deaths", "houses_supplied")["error"]
 
 

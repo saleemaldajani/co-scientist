@@ -300,13 +300,17 @@ def simulate_handle_removal(removal_date: str = "1854-09-08", fit_days: int = 5)
         slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
         icpt = my - slope * mx
         last = max(d for d, _ in dated)
-        proj = sum(math.exp(icpt + slope * k) for k in range(1, (last - removal).days + 1))
         sim = dict(
             fit_window=f"{fit[0][0]} to {fit[-1][0]}",
             daily_decline_pct=round((1 - math.exp(slope)) * 100, 1),
-            projected_onsets_after_removal_if_no_effect=round(proj, 1),
             recorded_onsets_after_removal=int(after),
         )
+        if slope < 0:
+            proj = sum(math.exp(icpt + slope * k) for k in range(1, (last - removal).days + 1))
+            sim["projected_onsets_after_removal_if_no_effect"] = round(proj, 1)
+        else:  # onsets were still rising: projecting that growth forward is not a no-effect counterfactual
+            sim["projected_onsets_after_removal_if_no_effect"] = None
+            sim["note"] = "onsets were rising in the fit window, so no projection; choose a removal date after the peak"
     return dict(
         file=SOHO,
         peak_date=str(peak_day),
