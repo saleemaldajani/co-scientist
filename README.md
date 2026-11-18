@@ -79,7 +79,7 @@ server. After a run has ranked its ideas, each of the top three goes through fou
 tools over the Model Context Protocol (MCP); the model writes a simulation question that would test the idea and up to
 three tool calls that answer it; the calls run in a separate server process; and the model reads the computed results,
 gives a verdict (supported, inconclusive or refuted) with the numbers, and rewrites the idea so every number it states
-agrees with the results. Checked ideas are listed by verdict, supported first. Two servers ship with the app
+agrees with the results. An unreadable plan is asked for once more, and an idea none of whose calls ran is left unchanged and marked inconclusive, never judged without a result. Checked ideas are listed by verdict, supported first. Two servers ship with the app
 (`app/sim_servers/`):
 
 - **Records lab** computes from the attached tables: rates and ratios by group, rate ratios with 95% intervals, and,

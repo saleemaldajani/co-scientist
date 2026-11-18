@@ -45,6 +45,10 @@ SERVERS = {
     ),
 }
 VERDICTS = ("supported", "inconclusive", "refuted")
+REPAIR = (
+    "\n\nYour previous reply could not be read as a JSON object with at least one call. Reply with only that JSON "
+    "object, using the tool names listed above."
+)
 
 
 def server_choices() -> List[str]:
@@ -250,14 +254,24 @@ class SimulationLab:
         checked = []
         for k, idea in enumerate(ideas[: self.top_k], 1):
             say(f"simulation check {k}/{min(self.top_k, len(ideas))}: designing")
-            design_reply = ask(self.design_prompt(goal, idea, data)) or ""
+            prompt = self.design_prompt(goal, idea, data)
+            design_reply = ask(prompt) or ""
             plan = _json_obj(design_reply)
+            if not plan.get("calls"):  # unreadable or empty plan: ask once more for the JSON alone
+                design_reply += "\n\n[retry]\n" + (ask(prompt + REPAIR) or "")
+                plan = _json_obj(design_reply.rsplit("[retry]", 1)[-1]) or plan
             calls = [c for c in plan.get("calls") or [] if isinstance(c, dict)][: self.max_calls]
             question = str(plan.get("question") or "")
             say(f"simulation check {k}: running {len(calls)} calls")
             results = self.call_many(calls) if calls else []
-            eval_reply = ask(self.evaluate_prompt(goal, idea, question, results)) or ""
-            ev = _json_obj(eval_reply)
+            if any(r["ok"] for r in results):
+                eval_reply = ask(self.evaluate_prompt(goal, idea, question, results)) or ""
+                ev = _json_obj(eval_reply)
+            else:  # nothing was computed, so there is nothing to judge the idea by: leave it as it was
+                eval_reply = ""
+                ev = dict(
+                    verdict="inconclusive", evidence="No simulation call ran successfully, so the idea is unchanged."
+                )
             verdict = str(ev.get("verdict", "")).strip().lower()
             verdict = verdict if verdict in VERDICTS else "inconclusive"
             evidence = str(ev.get("evidence") or "").strip()

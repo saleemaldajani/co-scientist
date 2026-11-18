@@ -118,6 +118,27 @@ def test_check_reports_bad_calls_and_unreadable_replies(tmp_path):
     assert "unknown tool" in res["log"][0]["results"][0]["output"]
 
 
+def test_no_verdict_without_a_computed_result_and_one_retry_for_an_unreadable_plan(tmp_path):
+    tables(tmp_path)
+    asked = []
+    good = json.dumps({"question": "q", "calls": [{"tool": "held_out_supplier_test", "arguments": {}}]})
+
+    def ask(p):
+        asked.append(p)
+        if "Write one simulation" not in p:
+            return json.dumps({"verdict": "refuted", "evidence": "made up", "revised_text": "changed"})
+        if "TITLE: fixed" in p:
+            return '{"calls": [{"tool": "held_out_supplier_test", "arguments: {}}]}' if len(asked) == 1 else good
+        return "no plan"
+
+    sim = SimulationLab("records", data_dir=str(tmp_path), top_k=2)
+    res = sim.check(ask, "goal", [dict(id="h1", title="fixed", text="t1"), dict(id="h2", title="never", text="t2")])
+    by = {e["id"]: e for e in res["final"]}
+    assert by["h1"]["verdict"] == "refuted" and res["log"][0]["calls_ok"] == 1  # the retry's plan ran
+    assert by["h2"]["verdict"] == "inconclusive" and by["h2"]["title"] == "never"  # nothing ran: not judged
+    assert sum("could not be read" in p for p in asked) == 2 and len(asked) == 5  # 2 designs + 2 retries + 1 evaluation
+
+
 def test_choices_parsing_and_requirements():
     assert server_choices()[0] == "No simulation" and server_from_choice("No simulation") is None
     assert server_from_choice(server_choices()[1]) == "records"
