@@ -199,3 +199,22 @@ def test_watch_huggingface_space_times_out_without_terminal_stage():
             assert "BUILDING" in str(exc)
         else:
             raise AssertionError("non-terminal stage did not time out")
+
+
+def test_deploy_space_uploads_only_app_files():
+    from scripts.deploy_space import deploy_space
+
+    calls = []
+    client = SimpleNamespace(
+        create_repo=lambda *a, **k: calls.append(("create", a, k)),
+        upload_folder=lambda **k: calls.append(("upload", (), k)),
+    )
+
+    url = deploy_space("user/space", "/tmp/checkout", "msg", client=client)
+
+    assert url == "https://huggingface.co/spaces/user/space"
+    assert calls[0][1] == ("user/space",) and calls[0][2]["space_sdk"] == "gradio"
+    upload = calls[1][2]
+    assert upload["repo_id"] == "user/space" and upload["folder_path"] == "/tmp/checkout"
+    assert "app.py" in upload["allow_patterns"] and "**/__pycache__/**" in upload["ignore_patterns"]
+    assert not any(".env" in p or "results" in p for p in upload["allow_patterns"])
