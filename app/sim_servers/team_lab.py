@@ -19,7 +19,10 @@ import math
 import random
 from typing import Any, Dict, List
 
-from mcp.server.mcpserver import MCPServer
+try:  # mcp 2.x
+    from mcp.server.mcpserver import MCPServer
+except ImportError:  # mcp 1.x (the version gradio[mcp] installs)
+    from mcp.server.fastmcp import FastMCP as MCPServer
 
 server = MCPServer("team-lab")
 

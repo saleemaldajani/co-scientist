@@ -21,7 +21,10 @@ import sys
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
-from mcp.server.mcpserver import MCPServer
+try:  # mcp 2.x
+    from mcp.server.mcpserver import MCPServer
+except ImportError:  # mcp 1.x (the version gradio[mcp] installs)
+    from mcp.server.fastmcp import FastMCP as MCPServer
 
 DATA_DIR = os.environ.get("RECORDS_LAB_DATA") or (sys.argv[1] if len(sys.argv) > 1 else ".")
 server = MCPServer("records-lab")
