@@ -232,6 +232,21 @@ class GenerationAgent:
         data = getattr(research_goal, "data", None)
         if data:  # uploaded files: an extract chosen for the goal (prompt unchanged without data)
             prompt += "\n" + data.brief(research_goal.description, getattr(research_goal, "data_budget", 20000)) + "\n"
+        web = getattr(research_goal, "web", None)
+        if web:  # optional web search: the model writes queries, the results go into this generation prompt
+            prompt += web.step(
+                lambda p: call_llm(p, temperature=gen_temp, model=research_goal.llm_model),
+                research_goal.description,
+                step=f"generation {len(context.hypotheses) + 1}",
+            )
+        tools = getattr(research_goal, "tools", None)
+        if tools:  # optional science tools: the model writes tool calls, their output goes into this generation prompt
+            prompt += tools.step(
+                lambda p: call_llm(p, temperature=gen_temp, model=research_goal.llm_model),
+                research_goal.description,
+                step=f"generation {len(context.hypotheses) + 1}",
+                data=data.outline() if data else "",
+            )
 
         # Pass the specific temperature and num_hypotheses
         raw_output = call_llm_for_generation(

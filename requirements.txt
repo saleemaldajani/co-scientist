@@ -10,4 +10,7 @@ numpy==2.5.0
 arxiv==4.0.0  # arXiv API integration
 feedparser==6.0.12  # For arXiv RSS feeds
 python-dateutil==2.9.0.post0  # Date handling for literature search
-markdown-it-py==4.3.0  # Markdown to HTML for the Google-style bundle export
+markdown-it-py==4.3.0  # Markdown to HTML for the Export results bundle
+ddgs==9.16.1  # optional web search step (app/web_search.py)
+polite-http==0.1.3  # HTTP client of the science tools (app/science_skills)
+python-dotenv==1.2.3  # optional API keys of the science tools (.env)
