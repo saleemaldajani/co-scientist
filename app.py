@@ -15,6 +15,7 @@ from app.config import config
 from app.data_context import DataBundle, data_check_html
 from app.export import directions_from_lenses, ideas_from_hypotheses, write_bundle
 from app.models import ContextMemory, ResearchGoal
+from app.original_position import OriginalPositionCoScientist
 from app.peer_review import PeerReviewCoScientist
 from app.research_group import ResearchGroupCoScientist
 from app.run_store import delete_run, get_reports_dir, history_html, list_runs, report_file_url, save_run, write_report
@@ -49,7 +50,8 @@ SWARM_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_SWARM_TIMEOUT_SECONDS", "120
 TEAM_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_TEAM_TIMEOUT_SECONDS", "2400"))  # team modes make more, longer calls
 LAST_SWARM: Dict[str, Any] = {}
 # Organized swarms (app/research_group.py, app/peer_review.py): the same workers given roles
-TEAM_MODES = ("Research group", "Startup team", "Peer review")
+TEAM_MODES = ("Research group", "Startup team", "Peer review", "Original position")
+MAXIMIN = "Maximin (Rawls): lowest score from any member"
 SAME_MODEL = "Same as LLM Model"
 
 # Configure logging for Gradio
@@ -565,6 +567,19 @@ def stream_swarm_run(
     LAST_SWARM.clear()
     LAST_SWARM.update(res=res, goal=goal, model=model, mode=label.lower())
     html_out = format_swarm_results(res)
+    if res.get("principles"):  # original position: the principles agreed and each member's self-bias
+        import html as html_lib
+
+        items = "".join(f"<li>{html_lib.escape(p)}</li>" for p in res["principles"])
+        bias = res.get("self_bias")
+        note = (
+            f"<p>Self-bias (a member's mean score of its own ideas minus its mean score of the others'): {bias:+.2f}</p>"
+            if bias is not None
+            else ""
+        )
+        html_out = (
+            f"<details open><summary><b>Principles agreed</b></summary><ol>{items}</ol>{note}</details>" + html_out
+        )
     if organization:
         html_out = f"<p><b>{label}:</b> {organization}</p>" + html_out
     if label == "Swarm":
@@ -615,11 +630,31 @@ def build_team(
     rev_reviewers: int = 3,
     rev_total: int = 8,
     rev_reviewer_model: Optional[str] = None,
+    veil_members: int = 4,
+    veil_total: int = 8,
+    veil_on: bool = True,
+    veil_rank: str = MAXIMIN,
     data=None,
     progress=None,
 ):
     """The organized swarm for a team mode and a one-line description of it; ValueError for an invalid team."""
     kw = dict(data=data, progress=progress or (lambda m: None), parallel=4)
+    if mode == "Original position":
+        n = int(veil_members)
+        team = OriginalPositionCoScientist(
+            goal,
+            model=model,
+            n_members=n,
+            per_member=per_member(veil_total, n),
+            veil=bool(veil_on),
+            aggregate="maximin" if veil_rank == MAXIMIN else "mean",
+            **kw,
+        )
+        rule = "maximin ranking" if team.aggregate == "maximin" else "mean-score ranking"
+        return (
+            team,
+            f"{n} member{'s' * (n > 1)}, {'behind the veil of ignorance' if team.veil else 'veil lifted'}, {rule}",
+        )
     if mode == "Peer review":
         a, r = int(rev_authors), int(rev_reviewers)
         team = PeerReviewCoScientist(
@@ -1217,6 +1252,22 @@ def create_gradio_interface():
                         rev_reviewers = gr.Slider(minimum=1, maximum=3, value=3, step=1, label="Reviewers")
                         rev_total = gr.Slider(minimum=4, maximum=12, value=8, step=1, label="Ideas in all")
                     rev_reviewer_model = gr.Dropdown(choices=role_models, value=SAME_MODEL, label="Reviewer model")
+                with gr.Accordion(
+                    "⚖️ Original position settings (veil of ignorance)", open=True, visible=False
+                ) as veil_box:
+                    gr.Markdown(
+                        "After Rawls's original position (*A Theory of Justice*): before members know their research "
+                        "direction, each writes the principles for judging hypotheses, merged into one set; members then "
+                        "propose in their directions; every member scores every hypothesis against the principles without "
+                        "knowing which are its own; and the final ranking can follow the lowest score any member gave "
+                        "(maximin, the difference principle). Lifting the veil shows each judge its own ideas, as a control."
+                    )
+                    with gr.Row():
+                        veil_members = gr.Slider(minimum=2, maximum=8, value=4, step=1, label="Members")
+                        veil_total = gr.Slider(minimum=4, maximum=12, value=8, step=1, label="Ideas in all")
+                    with gr.Row():
+                        veil_on = gr.Checkbox(value=True, label="Veil of ignorance (uncheck to lift it)")
+                        veil_rank = gr.Radio(choices=[MAXIMIN, "Mean score"], value=MAXIMIN, label="Final ranking")
 
                 export_checkbox = gr.Checkbox(
                     value=True,
@@ -1246,7 +1297,7 @@ def create_gradio_interface():
                 1. **Enter a research goal**: the question, the data you can use, and what each hypothesis should contain (or load it from a .md/.txt file).
                 2. **Attach data** (optional): tables (.csv, .tsv) and a README; every step sees the parts relevant to it, and quoted numbers are checked against them.
                    **Science tools** (optional, off by default): let the model query databases, literature and the web before it writes hypotheses; choose all tools or pick them.
-                3. **Choose a mode**: *Single co-scientist* (one generation call per cycle), *Swarm* (parallel workers ranked by debate), or an organized swarm: *Research group* (PIs and students), *Startup team* (co-founders and junior members) or *Peer review* (authors and reviewers).
+                3. **Choose a mode**: *Single co-scientist* (one generation call per cycle), *Swarm* (parallel workers ranked by debate), or an organized swarm: *Research group* (PIs and students), *Startup team* (co-founders and junior members), *Peer review* (authors and reviewers) or *Original position* (principles and judgment behind a veil of ignorance).
                 4. **Adjust settings** (optional): model, hypotheses per cycle, the swarm's workers, rounds and debates, and each team's size and role models.
                 5. **Run**: results appear below; with **Export results** ticked, a zip of .html, .md and .json files is ready to download.
 
@@ -1322,6 +1373,10 @@ def create_gradio_interface():
             rev_reviewers=3,
             rev_total=8,
             rev_reviewer_model=SAME_MODEL,
+            veil_members=4,
+            veil_total=8,
+            veil_on=True,
+            veil_rank=MAXIMIN,
         ):
             data = DataBundle.from_paths(data_paths or []) or None
             if mode in TEAM_MODES:
@@ -1344,6 +1399,10 @@ def create_gradio_interface():
                         rev_reviewers=rev_reviewers,
                         rev_total=rev_total,
                         rev_reviewer_model=rev_reviewer_model,
+                        veil_members=veil_members,
+                        veil_total=veil_total,
+                        veil_on=veil_on,
+                        veil_rank=veil_rank,
                     ),
                     skipped=tools_mode != "No tools" or sim_mode != "No simulation",
                 )
@@ -1524,6 +1583,10 @@ def create_gradio_interface():
                 rev_reviewers,
                 rev_total,
                 rev_reviewer_model,
+                veil_members,
+                veil_total,
+                veil_on,
+                veil_rank,
             ],
             outputs=[
                 status_output,
@@ -1560,7 +1623,7 @@ def create_gradio_interface():
         tools_mode.change(
             fn=lambda m: gr.update(visible=m == "Choose tools"), inputs=[tools_mode], outputs=[tools_pick]
         )
-        mode_radio.change(fn=mode_panels, inputs=[mode_radio], outputs=[swarm_box, lab_box, biz_box, rev_box])
+        mode_radio.change(fn=mode_panels, inputs=[mode_radio], outputs=[swarm_box, lab_box, biz_box, rev_box, veil_box])
 
         demo.load(
             fn=refresh_history_view,
