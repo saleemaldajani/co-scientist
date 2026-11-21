@@ -15,6 +15,8 @@ from app.config import config
 from app.data_context import DataBundle, data_check_html
 from app.export import directions_from_lenses, ideas_from_hypotheses, write_bundle
 from app.models import ContextMemory, ResearchGoal
+from app.peer_review import PeerReviewCoScientist
+from app.research_group import ResearchGroupCoScientist
 from app.run_store import delete_run, get_reports_dir, history_html, list_runs, report_file_url, save_run, write_report
 from app.science_tools import ScienceTools, tool_choices
 from app.simulation import SimulationLab, format_simulation_html, server_choices, server_from_choice
@@ -44,7 +46,11 @@ CYCLE_TIMEOUT_SECONDS = int(
 )  # same as swarm: busy free models need retries
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 SWARM_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_SWARM_TIMEOUT_SECONDS", "1200"))
+TEAM_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_TEAM_TIMEOUT_SECONDS", "2400"))  # team modes make more, longer calls
 LAST_SWARM: Dict[str, Any] = {}
+# Organized swarms (app/research_group.py, app/peer_review.py): the same workers given roles
+TEAM_MODES = ("Research group", "Startup team", "Peer review")
+SAME_MODEL = "Same as LLM Model"
 
 # Configure logging for Gradio
 logging.basicConfig(level=logging.INFO)
@@ -494,7 +500,6 @@ def run_swarm_with_progress(
     """Run swarm mode in the background and stream its progress until done or timed out."""
     model = llm_model if llm_model and llm_model != "-- Select Model --" else None
     log: List[str] = []
-    result: Dict[str, Any] = {}
     swarm = SwarmCoScientist(
         goal,
         model=model,
@@ -511,12 +516,27 @@ def run_swarm_with_progress(
         web=web,
         sim=sim,
     )
+    yield from stream_swarm_run(swarm, goal, model, log, timeout_seconds, poll_seconds)
+
+
+def stream_swarm_run(
+    swarm,
+    goal: str,
+    model: Optional[str],
+    log: List[str],
+    timeout_seconds: int = SWARM_TIMEOUT_SECONDS,
+    poll_seconds: float = CYCLE_PROGRESS_INTERVAL_SECONDS,
+    label: str = "Swarm",
+    organization: str = "",
+):
+    """Run a swarm (flat or organized) in the background; stream progress, then save and show the result."""
+    result: Dict[str, Any] = {}
 
     def worker():
         try:
             result["value"] = swarm.run()
         except Exception as e:  # surface the cause instead of a silent empty panel
-            logger.error("Swarm run failed: %s", e, exc_info=True)
+            logger.error("%s run failed: %s", label, e, exc_info=True)
             result["error"] = str(e)
 
     thread = threading.Thread(target=worker, daemon=True)
@@ -526,33 +546,38 @@ def run_swarm_with_progress(
         elapsed = time.monotonic() - started
         if elapsed >= timeout_seconds:
             yield (
-                f"⚠️ Swarm stopped waiting after {format_timeout_duration(timeout_seconds)}.",
+                f"⚠️ {label} stopped waiting after {format_timeout_duration(timeout_seconds)}.",
                 timeout_results_html(timeout_seconds),
                 "",
             )
             return
         steps = "\n".join(log[-4:])
         yield (
-            f"⏳ Swarm running ({format_timeout_duration(elapsed)}, {len(swarm.trace)} LLM calls so far)\n{steps}",
-            "<p>Swarm is running. Results appear when the tournament ends.</p>",
+            f"⏳ {label} running ({format_timeout_duration(elapsed)}, {len(swarm.trace)} LLM calls so far)\n{steps}",
+            f"<p>{label} is running. Results appear when the final ranking is done.</p>",
             "",
         )
         thread.join(timeout=min(poll_seconds, max(timeout_seconds - elapsed, 0.1)))
     if "error" in result or "value" not in result:
-        yield f"❌ Swarm failed: {result.get('error', 'no result')}", "", ""
+        yield f"❌ {label} failed: {result.get('error', 'no result')}", "", ""
         return
     res = result["value"]
     LAST_SWARM.clear()
-    LAST_SWARM.update(res=res, goal=goal, model=model)
+    LAST_SWARM.update(res=res, goal=goal, model=model, mode=label.lower())
     html_out = format_swarm_results(res)
-    status = f"✅ Swarm finished: {len(res['final'])} hypotheses ranked from {len(res['hypotheses'])} after {len(res['matches'])} debates."
+    if organization:
+        html_out = f"<p><b>{label}:</b> {organization}</p>" + html_out
+    if label == "Swarm":
+        status = f"✅ Swarm finished: {len(res['final'])} hypotheses ranked from {len(res['hypotheses'])} after {len(res['matches'])} debates."
+    else:
+        status = f"✅ {label} finished: {len(res['final'])} hypotheses ranked from {len(res['hypotheses'])} ({organization})."
     if res["errors"]:
         status += f" {len(res['errors'])} problems (see results)."
     saved = save_run(
         research_goal=ResearchGoal(description=goal, llm_model=model),
         cycle_details={
             "iteration": 1,
-            "mode": "swarm",
+            "mode": label.lower(),
             "steps": {},
             "swarm": {k: v for k, v in res.items() if k != "trace"},
         },
@@ -563,6 +588,80 @@ def run_swarm_with_progress(
     )
     report_path = write_report(saved)
     yield f"{status}\nRun ID: {saved['run_id']}\nReport: {report_file_url(report_path)}", html_out, ""
+
+
+def per_member(total: int, members: int) -> int:
+    """Ideas per member so that the team proposes about `total` ideas in all."""
+    return max(1, int(total) // max(1, int(members)))
+
+
+def role_model(choice: Optional[str], model: Optional[str]) -> Optional[str]:
+    return model if not choice or choice in (SAME_MODEL, "-- Select Model --") else choice
+
+
+def build_team(
+    mode: str,
+    goal: str,
+    model: Optional[str],
+    lab_pis: int = 1,
+    lab_students: int = 4,
+    lab_total: int = 8,
+    lab_pi_model: Optional[str] = None,
+    lab_student_model: Optional[str] = None,
+    biz_founders: int = 2,
+    biz_juniors: int = 0,
+    biz_total: int = 8,
+    rev_authors: int = 4,
+    rev_reviewers: int = 3,
+    rev_total: int = 8,
+    rev_reviewer_model: Optional[str] = None,
+    data=None,
+    progress=None,
+):
+    """The organized swarm for a team mode and a one-line description of it; ValueError for an invalid team."""
+    kw = dict(data=data, progress=progress or (lambda m: None), parallel=4)
+    if mode == "Peer review":
+        a, r = int(rev_authors), int(rev_reviewers)
+        team = PeerReviewCoScientist(
+            goal,
+            model=model,
+            n_authors=a,
+            n_reviewers=r,
+            per_author=per_member(rev_total, a),
+            reviewer_model=role_model(rev_reviewer_model, model),
+            **kw,
+        )
+        return team, f"{a} author{'s' * (a > 1)}, {r} reviewer{'s' * (r > 1)}, two review rounds"
+    if mode in ("Research group", "Startup team"):
+        lab = mode == "Research group"
+        p, s = (int(lab_pis), int(lab_students)) if lab else (int(biz_founders), int(biz_juniors))
+        if lab and s < 1:
+            raise ValueError("A research group needs at least one student.")
+        if s and s % p and p % s:
+            who = "students and PIs" if lab else "junior members and co-founders"
+            raise ValueError(f"The numbers of {who} must divide one another (for example 2 and 4, or 4 and 1).")
+        team = ResearchGroupCoScientist(
+            goal,
+            model=model,
+            n_pis=p,
+            n_students=s,
+            per_student=per_member(lab_total if lab else biz_total, s or p),
+            pi_model=role_model(lab_pi_model, model) if lab else model,
+            student_model=role_model(lab_student_model, model) if lab else model,
+            framing="lab" if lab else "startup",
+            **kw,
+        )
+        if lab:
+            return team, f"{p} PI{'s' * (p > 1)}, {s} student{'s' * (s > 1)}"
+        return team, f"{p} co-founder{'s' * (p > 1)}" + (
+            f", {s} junior member{'s' * (s > 1)}" if s else " (no junior members)"
+        )
+    raise ValueError(f"Unknown team mode: {mode}")
+
+
+def mode_panels(mode: str):
+    """Show only the settings panel of the chosen mode."""
+    return [gr.update(visible=mode == m) for m in ("Swarm", *TEAM_MODES)]
 
 
 def export_bundle_zip(mode: str) -> Optional[str]:
@@ -591,7 +690,7 @@ def export_bundle_zip(mode: str) -> Optional[str]:
                 LAST_SWARM["goal"],
                 directions=directions_from_lenses(res.get("lenses")),  # the records the live Directions list shows
                 tool_calls=res.get("tool_calls"),
-                mode="swarm",
+                mode=LAST_SWARM.get("mode") or "swarm",
                 model=LAST_SWARM.get("model") or "",
                 input_note=note,
             )
@@ -1062,12 +1161,14 @@ def create_gradio_interface():
                     )
 
                 mode_radio = gr.Radio(
-                    choices=["Single co-scientist", "Swarm"],
+                    choices=["Single co-scientist", "Swarm", *TEAM_MODES],
                     value="Single co-scientist",
                     label="Mode",
-                    info="Swarm: an orchestrator splits the goal, parallel workers generate, an LLM judge ranks by pairwise debate, the top ideas are rewritten from their critiques.",
+                    info="Swarm: an orchestrator splits the goal, parallel workers generate, an LLM judge ranks by pairwise debate, "
+                    "the top ideas are rewritten from their critiques. Research group, Startup team and Peer review give the "
+                    "swarm's workers roles (settings below).",
                 )
-                with gr.Accordion("🐝 Swarm Settings", open=False):
+                with gr.Accordion("🐝 Swarm Settings", open=False, visible=False) as swarm_box:
                     with gr.Row():
                         swarm_workers = gr.Slider(minimum=2, maximum=6, value=3, step=1, label="Workers")
                         swarm_per_worker = gr.Slider(
@@ -1080,6 +1181,42 @@ def create_gradio_interface():
                         swarm_matches = gr.Slider(
                             minimum=1, maximum=4, value=2, step=1, label="Debate Rounds per Round"
                         )
+                role_models = [SAME_MODEL, *get_model_dropdown_choices()]
+                with gr.Accordion("🎓 Research group settings", open=True, visible=False) as lab_box:
+                    gr.Markdown(
+                        "PIs set agendas and brief their students; students propose, discuss them at a lab meeting and "
+                        "revise; each PI puts its best ideas forward, and the PIs judge them in debates. With more PIs "
+                        "than students, two or four PIs co-advise each student. The two numbers must divide one another."
+                    )
+                    with gr.Row():
+                        lab_pis = gr.Slider(minimum=1, maximum=4, value=1, step=1, label="PIs")
+                        lab_students = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="Students")
+                        lab_total = gr.Slider(minimum=4, maximum=12, value=8, step=1, label="Ideas in all")
+                    with gr.Row():
+                        lab_pi_model = gr.Dropdown(choices=role_models, value=SAME_MODEL, label="PI model")
+                        lab_student_model = gr.Dropdown(choices=role_models, value=SAME_MODEL, label="Student model")
+                with gr.Accordion("🚀 Startup team settings", open=True, visible=False) as biz_box:
+                    gr.Markdown(
+                        "The same structure with startup roles: co-founders each lead a team of junior members and "
+                        "decide which ventures go forward. With no junior members, co-founders propose and review one "
+                        "another's ideas. Works best with a business brief: a customer, a market size and a test that "
+                        "could prove the idea wrong."
+                    )
+                    with gr.Row():
+                        biz_founders = gr.Slider(minimum=1, maximum=4, value=2, step=1, label="Co-founders")
+                        biz_juniors = gr.Slider(minimum=0, maximum=8, value=0, step=1, label="Junior members")
+                        biz_total = gr.Slider(minimum=4, maximum=12, value=8, step=1, label="Ideas in all")
+                with gr.Accordion("📝 Peer review settings", open=True, visible=False) as rev_box:
+                    gr.Markdown(
+                        "Authors submit ideas; every reviewer referees every submission blind (score 1 to 10 and a "
+                        "recommendation); authors revise and reply; reviewers score the revisions, and the final list "
+                        "follows the second scores."
+                    )
+                    with gr.Row():
+                        rev_authors = gr.Slider(minimum=1, maximum=8, value=4, step=1, label="Authors")
+                        rev_reviewers = gr.Slider(minimum=1, maximum=3, value=3, step=1, label="Reviewers")
+                        rev_total = gr.Slider(minimum=4, maximum=12, value=8, step=1, label="Ideas in all")
+                    rev_reviewer_model = gr.Dropdown(choices=role_models, value=SAME_MODEL, label="Reviewer model")
 
                 export_checkbox = gr.Checkbox(
                     value=True,
@@ -1109,14 +1246,15 @@ def create_gradio_interface():
                 1. **Enter a research goal**: the question, the data you can use, and what each hypothesis should contain (or load it from a .md/.txt file).
                 2. **Attach data** (optional): tables (.csv, .tsv) and a README; every step sees the parts relevant to it, and quoted numbers are checked against them.
                    **Science tools** (optional, off by default): let the model query databases, literature and the web before it writes hypotheses; choose all tools or pick them.
-                3. **Choose a mode**: *Single co-scientist* (one generation call per cycle) or *Swarm* (parallel workers ranked by debate).
-                4. **Adjust settings** (optional): model, hypotheses per cycle, and the swarm's workers, rounds and debates.
+                3. **Choose a mode**: *Single co-scientist* (one generation call per cycle), *Swarm* (parallel workers ranked by debate), or an organized swarm: *Research group* (PIs and students), *Startup team* (co-founders and junior members) or *Peer review* (authors and reviewers).
+                4. **Adjust settings** (optional): model, hypotheses per cycle, the swarm's workers, rounds and debates, and each team's size and role models.
                 5. **Run**: results appear below; with **Export results** ticked, a zip of .html, .md and .json files is ready to download.
 
                 ### 💡 Tips
                 - Start small on the free models: 3 workers × 3 hypotheses, 1 round
                 - Larger models give sharper debates; compact free models are listed first because they are faster
-                - Each single-mode cycle builds on the previous one; a swarm run is self-contained
+                - Each single-mode cycle builds on the previous one; a swarm or team run is self-contained
+                - Science tools and the simulation check run in Single and Swarm modes; team modes use the goal and attached data
                 - References are written by the model, not retrieved: check them before relying on them
                 
                 **Note:** Free models can be rate-limited or slow. The app will try a few free fallbacks automatically, and you can select a different recommended free model in Advanced Settings.
@@ -1172,8 +1310,44 @@ def create_gradio_interface():
             tools_mode="No tools",
             tools_pick=None,
             sim_mode="No simulation",
+            lab_pis=1,
+            lab_students=4,
+            lab_total=8,
+            lab_pi_model=SAME_MODEL,
+            lab_student_model=SAME_MODEL,
+            biz_founders=2,
+            biz_juniors=0,
+            biz_total=8,
+            rev_authors=4,
+            rev_reviewers=3,
+            rev_total=8,
+            rev_reviewer_model=SAME_MODEL,
         ):
             data = DataBundle.from_paths(data_paths or []) or None
+            if mode in TEAM_MODES:
+                yield from run_team(
+                    mode,
+                    research_goal,
+                    llm_model,
+                    export,
+                    data,
+                    dict(
+                        lab_pis=lab_pis,
+                        lab_students=lab_students,
+                        lab_total=lab_total,
+                        lab_pi_model=lab_pi_model,
+                        lab_student_model=lab_student_model,
+                        biz_founders=biz_founders,
+                        biz_juniors=biz_juniors,
+                        biz_total=biz_total,
+                        rev_authors=rev_authors,
+                        rev_reviewers=rev_reviewers,
+                        rev_total=rev_total,
+                        rev_reviewer_model=rev_reviewer_model,
+                    ),
+                    skipped=tools_mode != "No tools" or sim_mode != "No simulation",
+                )
+                return
             tools, web = build_tools(tools_mode, tools_pick)
             try:
                 sim = build_simulation(sim_mode, data_paths)
@@ -1282,6 +1456,42 @@ def create_gradio_interface():
                     export_bundle_zip("Single co-scientist"),
                 )
 
+        def run_team(mode, research_goal, llm_model, export, data, team, skipped=False):
+            def out(status, results="", references="", bundle=None):
+                return (
+                    status,
+                    results,
+                    references,
+                    history_html(),
+                    gr.update(choices=history_run_choices(), value=None),
+                    bundle,
+                )
+
+            if not (research_goal or "").strip():
+                yield out("❌ Error: Please enter a research goal.")
+                return
+            model = llm_model if llm_model and llm_model != "-- Select Model --" else None
+            log: List[str] = []
+            try:
+                swarm, organization = build_team(
+                    mode, research_goal.strip(), model, data=data, progress=log.append, **team
+                )
+            except ValueError as e:
+                yield out(f"❌ {e}")
+                return
+            note = (
+                "Science tools and the simulation check run in Single and Swarm modes only; this run uses neither.\n"
+                if skipped
+                else ""
+            )
+            status = results = references = ""
+            for status, results, references in stream_swarm_run(
+                swarm, research_goal.strip(), model, log, TEAM_TIMEOUT_SECONDS, label=mode, organization=organization
+            ):
+                yield out(note + status, results, references)
+            if export and LAST_SWARM.get("mode") == mode.lower():
+                yield out(note + status, results, references, export_bundle_zip("Swarm"))
+
         run_cycle_btn.click(
             fn=run_full_cycle,
             inputs=[
@@ -1302,6 +1512,18 @@ def create_gradio_interface():
                 tools_mode,
                 tools_pick,
                 sim_mode,
+                lab_pis,
+                lab_students,
+                lab_total,
+                lab_pi_model,
+                lab_student_model,
+                biz_founders,
+                biz_juniors,
+                biz_total,
+                rev_authors,
+                rev_reviewers,
+                rev_total,
+                rev_reviewer_model,
             ],
             outputs=[
                 status_output,
@@ -1338,6 +1560,7 @@ def create_gradio_interface():
         tools_mode.change(
             fn=lambda m: gr.update(visible=m == "Choose tools"), inputs=[tools_mode], outputs=[tools_pick]
         )
+        mode_radio.change(fn=mode_panels, inputs=[mode_radio], outputs=[swarm_box, lab_box, biz_box, rev_box])
 
         demo.load(
             fn=refresh_history_view,
