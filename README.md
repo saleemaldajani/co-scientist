@@ -36,11 +36,13 @@ A single co-scientist asks one model call for all hypotheses at once, then ranks
 Every model call, debate and merge is logged with the run. The single co-scientist mode is unchanged, so the two can be compared on the same goal and model.
 
 ### Team modes
-Three modes give the swarm's workers roles, each with its own settings panel under Mode:
+Four modes give the swarm's workers roles, each with its own settings panel under Mode:
 
 - **Research group.** PIs set agendas and brief their students; students propose, discuss their ideas at a lab meeting and revise; each PI puts its best ideas forward, and the PIs judge them in debates. Choose 1 to 4 PIs and 1 to 8 students (the two numbers must divide one another; with more PIs than students, PIs co-advise), and optionally a different model for the PIs and for the students.
 - **Startup team.** The same structure with startup roles: co-founders each lead a team of junior members (0 to 8; with none, co-founders propose and review one another's ideas). Works best with a business brief.
 - **Peer review.** Authors (1 to 8) submit ideas; every reviewer (1 to 3) referees every submission blind, with a score from 1 to 10 and a recommendation; authors revise and reply; reviewers score the revisions, and the final list follows the second scores. The reviewers can use a different model.
+
+- **Original position.** After Rawls's original position in *A Theory of Justice*: before members (2 to 8) know their research direction, each writes the principles by which hypotheses should be judged, and the principles are merged into one set; members then propose in their directions; every member scores every hypothesis against the principles without being told which are its own (the veil of ignorance); and the final ranking follows the lowest score any member gave (maximin, after the difference principle) or the mean score. Unchecking the veil shows each judge its own ideas, as a control, and the results report each member's self-bias.
 
 Each team proposes about the number of ideas set under **Ideas in all** (8 by default). Team modes use the goal and any attached data; science tools and the simulation check run in Single and Swarm modes.
 
@@ -123,7 +125,7 @@ export OPENROUTER_API_KEY=your_key      # https://openrouter.ai/keys; free model
 python app.py                           # http://localhost:7860
 ```
 
-Enter a research goal, choose **Single co-scientist**, **Swarm** or a team mode (**Research group**, **Startup team**, **Peer review**) under Mode, adjust its settings if needed, and run.
+Enter a research goal, choose **Single co-scientist**, **Swarm** or a team mode (**Research group**, **Startup team**, **Peer review**, **Original position**) under Mode, adjust its settings if needed, and run.
 
 ### Local open models
 The app talks to any OpenAI-compatible endpoint, so it can run entirely on a local machine, for example with [Ollama](https://ollama.com):

@@ -56,6 +56,17 @@ def test_peer_review_team(app_module):
     assert org == "8 authors, 1 reviewer, two review rounds"
 
 
+def test_original_position_team(app_module):
+    team, org = app_module.build_team("Original position", "goal", "m", veil_members=4, veil_total=8)
+    assert team.veil is True and team.aggregate == "maximin" and (team.n_members, team.per_worker) == (4, 2)
+    assert org == "4 members, behind the veil of ignorance, maximin ranking"
+    team, org = app_module.build_team(
+        "Original position", "goal", "m", veil_members=2, veil_on=False, veil_rank="Mean score"
+    )
+    assert team.veil is False and team.aggregate == "mean"
+    assert org == "2 members, veil lifted, mean-score ranking"
+
+
 def test_invalid_teams_are_explained(app_module):
     with pytest.raises(ValueError, match="divide one another"):
         app_module.build_team("Research group", "goal", "m", lab_pis=2, lab_students=3)
@@ -67,8 +78,9 @@ def test_invalid_teams_are_explained(app_module):
 
 def test_only_the_chosen_panel_is_shown(app_module):
     shown = [u["visible"] for u in app_module.mode_panels("Peer review")]
-    assert shown == [False, False, False, True]
-    assert [u["visible"] for u in app_module.mode_panels("Single co-scientist")] == [False] * 4
+    assert shown == [False, False, False, True, False]
+    assert [u["visible"] for u in app_module.mode_panels("Original position")][-1] is True
+    assert [u["visible"] for u in app_module.mode_panels("Single co-scientist")] == [False] * 5
 
 
 def fake_review_llm(prompt, temperature=0.7, model=None, fallback_models=None):
